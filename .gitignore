@@ -34,3 +34,12 @@ compile_commands.json
 src/idf_component.yml
 benchmark/logs/
 benchmark/summary.md
+
+# Share agent guidance and official G-Stack team hooks; keep local runtime private.
+!CLAUDE.md
+!.claude/
+.claude/*
+!.claude/hooks/
+.claude/hooks/*
+!.claude/hooks/check-gstack.cjs
+!.claude/settings.json
