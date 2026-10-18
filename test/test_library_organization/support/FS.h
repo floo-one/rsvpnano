@@ -39,6 +39,7 @@ public:
         : disk_(disk), node_(node), path_(std::move(path)) {}
     explicit operator bool() const { return bool(node_); }
     bool isDirectory() const { return node_ && node_->directory; }
+    size_t position() const { return position_; }
     size_t size() const { return node_ ? node_->bytes.size() : 0; }
     size_t read(uint8_t* out, size_t length) {
         if (!node_ || disk_->fails("read", path_)) return 0;

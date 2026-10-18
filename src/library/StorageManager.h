@@ -25,6 +25,7 @@ public:
     void refreshBooks(bool includeMetadata = true);
     std::expected<void, std::error_code> installBook(std::string_view stagedPath, std::string_view destinationPath);
     std::expected<void, std::error_code> removeBook(std::string_view path);
+    uint64_t generation() const { return generation_; }
     bool mounted() const {
         return mounted_;
     }
@@ -44,6 +45,7 @@ private:
     void refreshBookPaths(bool includeMetadata = true);
     void clearBookCache();
 
+    uint64_t generation_ = 0;
     bool mounted_ = false;
     StatusCallback statusCallback_ = &StorageManager::ignoreStatus;
     void* statusContext_ = nullptr;

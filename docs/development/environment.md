@@ -44,3 +44,5 @@ Run `.local/venv/bin/pio test -e native_library_test` for the real organization 
 Run `.local/venv/bin/pio test -e native_reading_status_test` for reader lifecycle, status commands and Start again recovery. See [reader integration validation](reading-status.md) for coverage boundaries and sanitizer commands. It uses the same installed framework prerequisite and does not upload firmware.
 
 Run `.local/venv/bin/pio test -e native_feed_organization_test` for registry, matching, shared progress, fair scans and import recovery. See [feed integration validation](feed-organization.md). The same installed ESP32 framework prerequisite applies; no firmware upload is performed.
+
+Run `.local/venv/bin/pio test -e native_library_view_test` for collection projections, sorting, remembered context, source-safe selection and the actual shared screen-data builder. See [library view validation](library-views.md) for coverage and remaining UI/device boundaries. It uses the installed ESP32 framework's SHA implementation; no firmware upload is performed.

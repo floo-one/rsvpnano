@@ -177,6 +177,8 @@ void App::update(uint32_t nowMs) {
     }
     ReadingProgress::save(readerScreen_.session, prefs_, false, nowMs);
 
+    serviceLibrary();
+    if (backgroundJobActive() && !typographyJobActive()) return;
     renderScreen(nowMs);
     if (!preparingTypography && !readerScreen_.session.playing && !companionApi_.active() && !usbTransfer_.active()
         && screen_ != screens::Screen::FocusSession && screen_ != screens::Screen::Status
@@ -272,10 +274,11 @@ void App::renderScreen(uint32_t nowMs) {
     case screens::Screen::Library: {
         const auto& items = libraryScreen_.items(storage_, readerScreen_.store, readerScreen_.session);
         immediateUi_.beginFrame(static_cast<uint8_t>(screen_));
+        libraryScreen_.observeTouch(immediateUi_.touch());
         const screens::Action result = libraryScreen_.draw(immediateUi_, items, nowMs, screen_);
         immediateUi_.endFrame();
         if (result == screens::Action::OpenBook) {
-            runBookOpen(libraryScreen_.selectedIndex(), nowMs);
+            if (auto selected = libraryScreen_.selection()) runBookOpen(*selected, nowMs);
         } else {
             handleScreenAction(result, nowMs);
         }
@@ -498,6 +501,10 @@ void App::handleInput(Input::ActionMask actions, uint32_t nowMs) {
         exitStandby(nowMs);
         return;
     }
+    if (jobKind_ == JobKind::Library && (Input::hasAction(actions, Input::ActionBack) || Input::hasAction(actions, Input::ActionOpenMenu))) {
+        cancelLibraryPreparation_ = true;
+        return;
+    }
     if (backgroundJobActive() || screen_ == screens::Screen::Status)
         return;
     if (usbTransfer_.active() && Input::hasAction(actions, Input::ActionPowerOff)) {
@@ -637,6 +644,22 @@ void App::updateBackgroundJob() {
         vQueueDelete(jobQueue_);
         jobQueue_ = nullptr;
         Logger::checkpoint("running");
+        if (completed == JobKind::Library) {
+            if (jobLibraryError_ == std::errc::operation_canceled) {
+                screen_ = screens::Screen::Read;
+                immediateUi_.invalidate();
+                return;
+            }
+            if (jobLibraryError_) {
+                Logger::failure("library", "prepare", "library", jobLibraryError_);
+                showTransientStatus(immediateUi_.text(UiText::Library), immediateUi_.text(UiText::BookFailed),
+                    immediateUi_.text(jobLibraryError_ == std::errc::not_enough_memory ? UiText::Unavailable : UiText::CheckSdCard), 1800, screens::Screen::Read);
+            } else {
+                screen_ = screens::Screen::Library;
+                immediateUi_.invalidate();
+            }
+            return;
+        }
         if (completed == JobKind::ReadingOrganization) {
             auto& session = readerScreen_.session;
             const bool current = session.organization && *session.organization == jobReadingCommand_.target
@@ -670,11 +693,11 @@ void App::updateBackgroundJob() {
         }
         if (completed == JobKind::Typography) {
             if (bookOpenPending_) {
-                const size_t index = pendingBookIndex_;
+                const auto selected = std::move(pendingBookSelection_);
                 bookOpenPending_ = false;
                 typographyRefreshPending_ = false;
                 typographyOpensBook_ = false;
-                runBookOpen(index, millis());
+                runBookOpen(selected, millis());
                 return;
             }
             if (typographyRefreshPending_) {
@@ -820,8 +843,28 @@ void App::runBackgroundJob() {
         complete.rebootRequired = result.rebootRequired;
         break;
     }
+    case JobKind::Library: {
+        uint64_t lastReported = UINT64_MAX;
+        auto result = libraryScreen_.prepare(storage_, Board::Storage::filesystem(), [&](uint64_t done, uint64_t total) {
+            if (done != lastReported && (done % 8 == 0)) {
+                lastReported = done;
+                renderStorageStatus(this, "Library", "Preparing collections", "", total ? done * 100 / total : 100);
+            }
+            yield(); return !cancelLibraryPreparation_.load();
+        });
+        jobLibraryError_ = result ? std::error_code{} : result.error();
+        break;
+    }
     case JobKind::Book: {
         Logger::checkpoint("book_open");
+        // Revalidate bytes after any queued typography delay, before conversion/open.
+        auto index = LibraryView::resolve(jobBookSelection_, storage_.generation(), libraryScreen_.view().rows());
+        auto source = LibraryOrganization::hashSource(Board::Storage::filesystem(), jobBookSelection_.path,
+            [](uint64_t processed, uint64_t) { if (processed % (64 * 1024) == 0) yield(); return true; });
+        if (!index || !source || *source != jobBookSelection_.source) { jobBookLoaded_ = false; break; }
+        const auto* entry = storage_.book(*index);
+        if (!entry || entry->path != jobBookSelection_.path) { jobBookLoaded_ = false; break; }
+        jobBookIndex_ = *index;
         jobBookLoaded_ = storage_.loadIndexedBook(jobBookIndex_, readerScreen_.store, readerScreen_.session.metadata);
         if (jobBookLoaded_) readerScreen_.prepareOrganization();
         break;
@@ -899,6 +942,34 @@ void App::enqueueJobUpdate(JobUpdate update, bool mustSucceed) {
     xQueueSend(jobQueue_, &update, 0);
 }
 
+void App::saveLibraryViews() {
+    if (!storage_.mounted() || usbTransfer_.active() || backgroundJobActive() || serialCompanion_.active() || companionApi_.active()) return;
+    if (auto saved = libraryScreen_.saveViews(Board::Storage::filesystem()); !saved)
+        Logger::failure("library", "save views", "/config/library-view.toml", saved.error());
+}
+
+void App::serviceLibrary() {
+    if (backgroundJobActive() || usbTransfer_.active() || serialCompanion_.active() || companionApi_.active()) return;
+    if (screen_ != screens::Screen::Library) {
+        if (libraryWasVisible_) { saveLibraryViews(); libraryWasVisible_ = false; }
+        return;
+    }
+    libraryWasVisible_ = true;
+    if (!libraryScreen_.needsPreparation(storage_)) return;
+    if (!storage_.mounted()) {
+        showTransientStatus(immediateUi_.text(UiText::Library), immediateUi_.text(UiText::CheckSdCard), {}, 1200, screens::Screen::Read);
+        return;
+    }
+    ReadingLoop::pause(readerScreen_.session);
+    screen_ = screens::Screen::Status;
+    statusUntilMs_ = 0;
+    screens::status(immediateUi_, immediateUi_.text(UiText::Library), immediateUi_.text(UiText::Checking));
+    cancelLibraryPreparation_ = false;
+    if (!startBackgroundJob(JobKind::Library)) {
+        showTransientStatus(immediateUi_.text(UiText::Library), immediateUi_.text(UiText::CouldNotStart), {}, 1200, screens::Screen::Read);
+    }
+}
+
 void App::runRss() {
     ReadingLoop::pause(readerScreen_.session);
     screen_ = screens::Screen::Status;
@@ -908,12 +979,16 @@ void App::runRss() {
         showTransientStatus("RSS", immediateUi_.text(UiText::CouldNotStart), {}, 1200, screens::Screen::Reader);
 }
 
-void App::runBookOpen(size_t index, uint32_t nowMs) {
-    if (!storage_.mounted() || index >= storage_.books().size())
+void App::runBookOpen(const LibraryView::Selection& selected, uint32_t nowMs) {
+    const auto index = LibraryView::resolve(selected, storage_.generation(), libraryScreen_.view().rows());
+    if (!storage_.mounted() || !index || *index >= storage_.books().size()
+        || storage_.books()[*index].path != selected.path) {
+        showTransientStatus(immediateUi_.text(UiText::Library), immediateUi_.text(UiText::BookFailed), {}, 1200, screens::Screen::Library);
         return;
-    const BookLibrary::Entry& book = storage_.books()[index];
+    }
+    const BookLibrary::Entry& book = storage_.books()[*index];
     if (typographyJobActive()) {
-        pendingBookIndex_ = index;
+        pendingBookSelection_ = selected;
         bookOpenPending_ = true;
         screens::status(immediateUi_, immediateUi_.text(UiText::OpeningBook), BookLibrary::displayName(book), {}, 5);
         screen_ = screens::Screen::Status;
@@ -923,7 +998,8 @@ void App::runBookOpen(size_t index, uint32_t nowMs) {
     if (backgroundJobActive())
         return;
 
-    jobBookIndex_ = index;
+    jobBookIndex_ = *index;
+    jobBookSelection_ = selected;
     jobBookLoaded_ = false;
     screens::status(immediateUi_, immediateUi_.text(UiText::OpeningBook), BookLibrary::displayName(book), {}, 5);
     screen_ = screens::Screen::Status;
@@ -935,6 +1011,7 @@ void App::runBookOpen(size_t index, uint32_t nowMs) {
 }
 
 void App::enterUsbTransfer(uint32_t nowMs) {
+    saveLibraryViews();
 #if RSVP_USB_TRANSFER_ENABLED
     if (serialCompanion_.active())
         return;
@@ -1049,6 +1126,7 @@ void App::runOtaCheck(bool install) {
 }
 
 void App::enterStandby(uint32_t nowMs) {
+    saveLibraryViews();
     if (companionApi_.active()) {
         companionApi_.end();
     } else {
@@ -1137,6 +1215,7 @@ void App::lightSleepFromStandby() {
 }
 
 void App::powerOff(uint32_t nowMs) {
+    saveLibraryViews();
     if (companionApi_.active())
         companionApi_.end();
     if (screen_ == screens::Screen::FocusSession)

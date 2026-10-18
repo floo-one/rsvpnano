@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 
+#include <atomic>
 #include <string>
 #include <string_view>
 
@@ -44,6 +45,7 @@ private:
         Book,
         Typography,
         ReadingOrganization,
+        Library,
     };
 
     struct JobUpdate {
@@ -57,12 +59,14 @@ private:
 
     void renderScreen(uint32_t nowMs);
     void serviceReadingOrganization(uint32_t nowMs);
+    void serviceLibrary();
+    void saveLibraryViews();
     void reconcileReadingOrder();
     void handleScreenAction(screens::Action action, uint32_t nowMs);
     void handleInput(Input::ActionMask actions, uint32_t nowMs);
     void handleTouch(uint32_t nowMs);
     void runRss();
-    void runBookOpen(size_t index, uint32_t nowMs);
+    void runBookOpen(const LibraryView::Selection&, uint32_t nowMs);
     bool requestTypographyRefresh();
     void updateBackgroundJob();
     bool startBackgroundJob(JobKind kind);
@@ -118,7 +122,11 @@ private:
     uint64_t readingOperation_ = 0;
     size_t jobBookIndex_ = 0;
     bool jobBookLoaded_ = false;
-    size_t pendingBookIndex_ = 0;
+    LibraryView::Selection jobBookSelection_;
+    LibraryView::Selection pendingBookSelection_;
+    std::error_code jobLibraryError_;
+    bool libraryWasVisible_ = false;
+    std::atomic<bool> cancelLibraryPreparation_{false};
     bool bookOpenPending_ = false;
     bool typographyRefreshPending_ = false;
     bool typographyOpensBook_ = false;

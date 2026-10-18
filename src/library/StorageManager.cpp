@@ -103,6 +103,7 @@ std::expected<void, std::error_code> StorageManager::removeBook(std::string_view
     Board::Storage::filesystem().remove(StoragePaths::indexedIndexPathFor(path).c_str());
     Board::Storage::filesystem().remove(StoragePaths::indexedDataPathFor(path).c_str());
     Board::Storage::filesystem().remove(StoragePaths::bookStatePathFor(path).c_str());
+    ++generation_;
     library_.erase(library_.begin() + index);
     return {};
 }
@@ -162,11 +163,13 @@ void StorageManager::refreshBookPaths(bool includeMetadata) {
     ESP_LOGI("storage", "library scan begin metadata=%u", includeMetadata ? 1U : 0U);
     statusCallback_(statusContext_, "SD", "Reading library", includeMetadata ? "Reading metadata" : "Finding books",
                     96);
+    ++generation_;
     BookLibrary::refresh(library_, includeMetadata, RSVP_ON_DEVICE_DOCUMENT_CONVERSION);
     ESP_LOGI("storage", "library scan ready books=%u metadata=%u", static_cast<unsigned>(library_.size()),
              includeMetadata ? 1U : 0U);
 }
 
 void StorageManager::clearBookCache() {
+    ++generation_;
     library_.clear();
 }
