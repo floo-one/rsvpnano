@@ -36,3 +36,7 @@ Compile outputs remain ignored under `.pio/build/<environment>/`. Web distributi
 Upstream `LICENSE` is MIT, copyright 2026 RSVP Nano contributors; it remains unchanged. Retain its notice and bundled library notices. Submodules: HarfBuzz `4c2aa804…` (`COPYING`), PDFio `b468d164…` (`LICENSE`), SheenBidi `9c048a32…` (`LICENSE`), zlib `da607da7…` (`LICENSE`). G-Stack is separately MIT and remains a global development tool, not embedded firmware. A release still needs normal dependency/license accounting; this setup does not relicense third-party assets.
 
 Most core versions are pinned upstream; XPowersLib remains a moving Git dependency and tooling resolves transitive packages. Do not claim full reproducibility from the Git SHA alone. Preserve logs/package manifests when reproducing a release.
+
+## Library foundation tests
+
+Run `.local/venv/bin/pio test -e native_library_test` for the real organization codec/recovery and fault-injection suite. The focused native environment also compiles the installed ESP32 SHA implementation through `tools/pio_native_library.py`; install the project framework with a board build first. See [foundation validation](library-foundation.md). This command does not upload firmware.

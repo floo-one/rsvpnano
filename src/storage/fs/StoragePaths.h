@@ -17,6 +17,8 @@ namespace StoragePaths {
     constexpr const char* kRssConfigPath = "/config/rss.toml";
     constexpr const char* kRssConfigTempPath = "/config/rss.toml.tmp";
     constexpr const char* kRssConfigBackupPath = "/config/rss.toml.bak";
+    constexpr const char* kLibraryFeedsPath = "/config/library-feeds.toml";
+    constexpr const char* kLibraryViewPath = "/config/library-view.toml";
     constexpr const char* kFocusConfigPath = "/config/focus.toml";
     constexpr const char* kFocusConfigTempPath = "/config/focus.toml.tmp";
     constexpr const char* kFocusConfigBackupPath = "/config/focus.toml.bak";
@@ -49,6 +51,9 @@ namespace StoragePaths {
     std::string indexedIndexPathFor(std::string_view path);
     std::string indexedDataPathFor(std::string_view path);
     std::string bookStatePathFor(std::string_view path);
+    // Full filename avoids collisions between book.txt and book.epub. Caller
+    // validates canonical library ownership before writing.
+    std::string libraryOrganizationPathFor(std::string_view path);
     std::string indexedTempPathFor(std::string_view path);
     bool isHiddenOrSidecarPath(std::string_view path);
 

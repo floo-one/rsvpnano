@@ -102,6 +102,10 @@ namespace StoragePaths {
         return siblingPathWithExtension(path, kBookStateExtension);
     }
 
+    std::string libraryOrganizationPathFor(std::string_view path) {
+        return parentDirectoryForPath(path) + "/." + displayNameForPath(path) + ".library.toml";
+    }
+
     std::string indexedTempPathFor(std::string_view path) {
         return std::string{path} + kTempExtension;
     }
