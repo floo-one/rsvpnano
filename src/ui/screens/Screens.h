@@ -51,6 +51,7 @@ namespace screens {
         Usb,
         Status,
         Standby,
+        ItemActions,
     };
 
     enum class Action : uint8_t {
@@ -68,6 +69,8 @@ namespace screens {
         EnableStorageEncryption,
         OtaCheck,
         OtaInstall,
+        ItemActions,
+        ItemActionsBack,
     };
 
     Action read(ui::Context& ui, std::string_view title, std::string_view author, uint8_t progress, Screen& screen);

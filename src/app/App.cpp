@@ -177,6 +177,7 @@ void App::update(uint32_t nowMs) {
     }
     ReadingProgress::save(readerScreen_.session, prefs_, false, nowMs);
 
+    serviceItemActions();
     serviceLibrary();
     if (backgroundJobActive() && !typographyJobActive()) return;
     renderScreen(nowMs);
@@ -233,7 +234,9 @@ void App::serviceReadingOrganization(uint32_t nowMs) {
         if (!queuedReadingCommand_) return;
     }
     if (!session.organization || queuedReadingCommand_->target != *session.organization) {
-        queuedReadingCommand_.reset(); return;
+        queuedReadingCommand_.reset();
+        manualItemCommand_ = false;
+        return;
     }
     jobResumeReading_ = session.playing;
     ReadingLoop::pause(session);
@@ -244,9 +247,15 @@ void App::serviceReadingOrganization(uint32_t nowMs) {
         jobReadingCommand_.operation = "r" + std::to_string(readingOperationNonce_) + "-" + std::to_string(++readingOperation_);
     if (!startBackgroundJob(JobKind::ReadingOrganization)) {
         session.organizationError = std::make_error_code(std::errc::resource_unavailable_try_again);
+        session.organizationErrorReported = true;
         if (jobReadingCommand_.command != ReadingOrganization::Command::startAgain)
             session.failedOrganization = jobReadingCommand_;
-        showTransientStatus(immediateUi_.text(UiText::Storage), immediateUi_.text(UiText::CouldNotStart), {}, 1200, screens::Screen::Read);
+        const auto destination = manualItemCommand_ ? screens::Screen::ItemActions : screens::Screen::Read;
+        if (manualItemCommand_)
+            itemActions_.failed();
+        manualItemCommand_ = false;
+        showTransientStatus(immediateUi_.text(UiText::Storage), immediateUi_.text(UiText::CouldNotStart), {}, 1200,
+                            destination);
     }
 #endif
 }
@@ -271,6 +280,10 @@ void App::renderScreen(uint32_t nowMs) {
         readerScreen_.draw(immediateUi_, storage_, battery_, nowMs);
         immediateUi_.endFrame();
         return;
+    case screens::Screen::ItemActions:
+        immediateUi_.beginFrame(static_cast<uint8_t>(screen_));
+        action = itemActions_.draw(immediateUi_);
+        break;
     case screens::Screen::Library: {
         const auto& items = libraryScreen_.items(storage_, readerScreen_.store, readerScreen_.session);
         immediateUi_.beginFrame(static_cast<uint8_t>(screen_));
@@ -278,7 +291,11 @@ void App::renderScreen(uint32_t nowMs) {
         const screens::Action result = libraryScreen_.draw(immediateUi_, items, nowMs, screen_);
         immediateUi_.endFrame();
         if (result == screens::Action::OpenBook) {
-            if (auto selected = libraryScreen_.selection()) runBookOpen(*selected, nowMs);
+            if (auto selected = libraryScreen_.selection()) {
+                readerFromLibrary_ = true;
+                libraryScreen_.rememberReaderOrigin();
+                runBookOpen(*selected, nowMs);
+            }
         } else {
             handleScreenAction(result, nowMs);
         }
@@ -421,7 +438,7 @@ void App::renderScreen(uint32_t nowMs) {
     immediateUi_.endFrame();
     if (screen_ != renderedScreen) {
         if (screen_ == screens::Screen::Library)
-            libraryScreen_.reset();
+            libraryScreen_.showRoot();
     }
     handleScreenAction(action, nowMs);
 }
@@ -438,13 +455,18 @@ void App::handleScreenAction(screens::Action action, uint32_t nowMs) {
         screen_ = screens::Screen::Reader;
         renderScreen(nowMs);
         return;
+    case screens::Action::ItemActions:
+        enterItemActions();
+        return;
+    case screens::Action::ItemActionsBack:
+        screen_ = itemActions_.origin();
+        libraryScreen_.cancelGesture();
+        immediateUi_.invalidate();
+        return;
     case screens::Action::MarkRead:
     case screens::Action::MarkUnread:
     case screens::Action::StartAgain:
-        if (readerScreen_.session.organization)
-            requestReadingAction(action == screens::Action::MarkRead ? ReadingOrganization::Command::markRead
-                : action == screens::Action::MarkUnread ? ReadingOrganization::Command::markUnread
-                : ReadingOrganization::Command::startAgain, *readerScreen_.session.organization);
+        dispatchItemAction(action);
         return;
     case screens::Action::PowerOff:
         powerOff(nowMs);
@@ -505,6 +527,11 @@ void App::handleInput(Input::ActionMask actions, uint32_t nowMs) {
         cancelLibraryPreparation_ = true;
         return;
     }
+    if (jobKind_ == JobKind::ItemInfo &&
+        (Input::hasAction(actions, Input::ActionBack) || Input::hasAction(actions, Input::ActionOpenMenu))) {
+        cancelItemInfo_ = true;
+        return;
+    }
     if (backgroundJobActive() || screen_ == screens::Screen::Status)
         return;
     if (usbTransfer_.active() && Input::hasAction(actions, Input::ActionPowerOff)) {
@@ -555,6 +582,18 @@ void App::handleInput(Input::ActionMask actions, uint32_t nowMs) {
         return;
     }
     if (Input::hasAction(actions, Input::ActionBack)) {
+        if (screen_ == screens::Screen::ItemActions) {
+            handleScreenAction(screens::Action::ItemActionsBack, nowMs);
+            renderScreen(nowMs);
+            return;
+        }
+        if (screen_ == screens::Screen::Library) {
+            if (!libraryScreen_.back())
+                screen_ = screens::Screen::Read;
+            immediateUi_.invalidate();
+            renderScreen(nowMs);
+            return;
+        }
         if (companionApi_.active()) {
             companionApi_.end();
             screen_ = screens::Screen::Device;
@@ -591,7 +630,10 @@ void App::handleInput(Input::ActionMask actions, uint32_t nowMs) {
             ReadingProgress::save(readerScreen_.session, prefs_, true, nowMs);
             ReadingLoop::pause(readerScreen_.session);
             libraryScreen_.invalidate();
-            screen_ = screens::Screen::Read;
+            const bool returnToLibrary = readerFromLibrary_ && readerLibraryPath_ == readerScreen_.session.sourcePath();
+            if (returnToLibrary)
+                libraryScreen_.restoreReaderOrigin();
+            screen_ = returnToLibrary ? screens::Screen::Library : screens::Screen::Read;
             renderScreen(nowMs);
         }
         return;
@@ -644,6 +686,32 @@ void App::updateBackgroundJob() {
         vQueueDelete(jobQueue_);
         jobQueue_ = nullptr;
         Logger::checkpoint("running");
+        if (completed == JobKind::ItemInfo) {
+            if (cancelItemInfo_) {
+                screen_ = itemActions_.origin();
+                libraryScreen_.cancelGesture();
+                immediateUi_.invalidate();
+                return;
+            }
+            itemActions_.loaded(jobItemStatus_, !jobItemError_, jobItemRecovery_);
+            if (jobItemError_)
+                Logger::failure("library", "item actions", jobItemSelection_.path.c_str(), jobItemError_);
+            screen_ = screens::Screen::ItemActions;
+            immediateUi_.invalidate();
+            return;
+        }
+        if (completed == JobKind::LibraryAction) {
+            if (jobItemError_) {
+                itemActions_.failed();
+                showTransientStatus(immediateUi_.text(UiText::ItemActions), immediateUi_.text(UiText::BookFailed),
+                                    immediateUi_.text(UiText::CheckSdCard), 1400, screens::Screen::ItemActions);
+            } else {
+                screen_ = itemActions_.origin();
+                libraryScreen_.invalidate();
+                immediateUi_.invalidate();
+            }
+            return;
+        }
         if (completed == JobKind::Library) {
             if (jobLibraryError_ == std::errc::operation_canceled) {
                 screen_ = screens::Screen::Read;
@@ -664,15 +732,22 @@ void App::updateBackgroundJob() {
             auto& session = readerScreen_.session;
             const bool current = session.organization && *session.organization == jobReadingCommand_.target
                 && session.activity == jobReadingCommand_.activity;
-            if (!current) return;
+            if (!current) {
+                manualItemCommand_ = false;
+                return;
+            }
             if (jobReadingError_) {
                 session.organizationError = jobReadingError_;
                 session.organizationErrorReported = true;
                 session.restartBlocked = jobReadingCommand_.command == ReadingOrganization::Command::startAgain;
                 if (!session.restartBlocked) session.failedOrganization = jobReadingCommand_;
                 ReadingLoop::pause(session);
+                const auto destination = manualItemCommand_ ? screens::Screen::ItemActions : screens::Screen::Read;
+                if (manualItemCommand_)
+                    itemActions_.failed();
+                manualItemCommand_ = false;
                 showTransientStatus(immediateUi_.text(UiText::Storage), immediateUi_.text(UiText::BookFailed),
-                                    immediateUi_.text(UiText::CheckSdCard), 1800, screens::Screen::Read);
+                                    immediateUi_.text(UiText::CheckSdCard), 1800, destination);
                 return;
             }
             session.organizationError.clear();
@@ -687,6 +762,9 @@ void App::updateBackgroundJob() {
                 session.lastAdvanceMs = millis();
                 session.resetWordClock = false;
             }
+            if (manualItemCommand_ && !jobRestartState_)
+                screen_ = itemActions_.origin();
+            manualItemCommand_ = false;
             libraryScreen_.invalidate();
             immediateUi_.invalidate();
             return;
@@ -709,8 +787,7 @@ void App::updateBackgroundJob() {
             if (typographyOpensBook_) {
                 typographyOpensBook_ = false;
                 ReadingLoop::pause(readerScreen_.session);
-                screen_ = screens::Screen::Reader;
-                statusUntilMs_ = 0;
+                finishOpenedBook();
             }
             renderScreen(millis());
             return;
@@ -727,13 +804,15 @@ void App::updateBackgroundJob() {
                 screens::status(immediateUi_, immediateUi_.text(UiText::OpeningBook), bookName, {}, 85);
                 if (!requestTypographyRefresh()) {
                     typographyOpensBook_ = false;
-                    screen_ = screens::Screen::Reader;
-                    statusUntilMs_ = 0;
+                    finishOpenedBook();
                     renderScreen(millis());
                 }
             } else {
+                const auto destination = restartAfterOpen_ ? screens::Screen::ItemActions : screens::Screen::Library;
+                restartAfterOpen_ = false;
+                itemActions_.failed();
                 showTransientStatus(immediateUi_.text(UiText::BookFailed), bookName,
-                                    immediateUi_.text(UiText::CheckSdCard), 1200, screens::Screen::Library);
+                                    immediateUi_.text(UiText::CheckSdCard), 1200, destination);
             }
             return;
         }
@@ -843,6 +922,51 @@ void App::runBackgroundJob() {
         complete.rebootRequired = result.rebootRequired;
         break;
     }
+    case JobKind::ItemInfo:
+    case JobKind::LibraryAction: {
+        jobItemRecovery_ = false;
+        jobItemError_.clear();
+        jobItemStatus_ = LibraryOrganization::Status::unknown;
+        const auto& selected = jobItemSelection_;
+        if (storage_.generation() != selected.generation || storage_.findBook(selected.path) < 0) {
+            jobItemError_ = LibraryOrganization::make_error_code(LibraryOrganization::Error::stale_identity);
+            break;
+        }
+        const auto proceed = [this](uint64_t done, uint64_t) {
+            if (done % (64 * 1024) == 0)
+                yield();
+            return jobKind_ != JobKind::ItemInfo || !cancelItemInfo_.load();
+        };
+        if (jobKind_ == JobKind::ItemInfo) {
+            auto source = LibraryOrganization::hashSource(Board::Storage::filesystem(), selected.path, proceed);
+            if (!source || *source != selected.source) {
+                jobItemError_ = source
+                                    ? LibraryOrganization::make_error_code(LibraryOrganization::Error::stale_identity)
+                                    : source.error();
+                break;
+            }
+            auto item = LibraryOrganization::loadItem(Board::Storage::filesystem(), selected.path, selected.source);
+            if (item) {
+                jobItemStatus_ = item->status;
+                jobItemRecovery_ = item->restart.has_value();
+            } else if (item.error() != std::errc::no_such_file_or_directory)
+                jobItemError_ = item.error();
+            else if (libraryScreen_.view().generation() == selected.generation) {
+                for (const auto& row : libraryScreen_.view().rows())
+                    if (row.path == selected.path && row.source == selected.source) {
+                        jobItemStatus_ = row.status;
+                        break;
+                    }
+            }
+        } else {
+            ReadingOrganization::Target target{selected.path, selected.source, {}, selected.generation};
+            auto result = ReadingOrganization::apply(Board::Storage::filesystem(),
+                                                     {target, jobItemOperation_, jobItemCommand_}, target, 0, proceed);
+            if (!result)
+                jobItemError_ = result.error();
+        }
+        break;
+    }
     case JobKind::Library: {
         uint64_t lastReported = UINT64_MAX;
         auto result = libraryScreen_.prepare(storage_, Board::Storage::filesystem(), [&](uint64_t done, uint64_t total) {
@@ -858,7 +982,9 @@ void App::runBackgroundJob() {
     case JobKind::Book: {
         Logger::checkpoint("book_open");
         // Revalidate bytes after any queued typography delay, before conversion/open.
-        auto index = LibraryView::resolve(jobBookSelection_, storage_.generation(), libraryScreen_.view().rows());
+        const int found =
+            jobBookSelection_.generation == storage_.generation() ? storage_.findBook(jobBookSelection_.path) : -1;
+        const auto index = found >= 0 ? std::optional<size_t>{static_cast<size_t>(found)} : std::nullopt;
         auto source = LibraryOrganization::hashSource(Board::Storage::filesystem(), jobBookSelection_.path,
             [](uint64_t processed, uint64_t) { if (processed % (64 * 1024) == 0) yield(); return true; });
         if (!index || !source || *source != jobBookSelection_.source) { jobBookLoaded_ = false; break; }
@@ -942,6 +1068,118 @@ void App::enqueueJobUpdate(JobUpdate update, bool mustSucceed) {
     xQueueSend(jobQueue_, &update, 0);
 }
 
+void App::enterItemActions() {
+    const bool fromLibrary = screen_ == screens::Screen::Library;
+    std::optional<LibraryView::Selection> selected;
+    std::string title;
+    if (fromLibrary) {
+        selected = libraryScreen_.selection();
+        if (selected)
+            for (const auto& row : libraryScreen_.view().rows())
+                if (row.path == selected->path) {
+                    title = row.title;
+                    break;
+                }
+    } else if (readerScreen_.session.organization) {
+        const auto& target = *readerScreen_.session.organization;
+        selected = LibraryView::Selection{target.path, target.source, storage_.generation()};
+        title = ReadingProgress::title(readerScreen_.session, storage_);
+    }
+    if (!selected) {
+        showTransientStatus(immediateUi_.text(UiText::ItemActions), immediateUi_.text(UiText::Unavailable), {}, 1200,
+                            screen_);
+        return;
+    }
+    ReadingLoop::pause(readerScreen_.session);
+    itemActions_.begin(*selected, std::move(title), fromLibrary ? screens::Screen::Library : screens::Screen::Read);
+    libraryScreen_.cancelGesture();
+    itemInfoPending_ = true;
+    screen_ = screens::Screen::ItemActions;
+    immediateUi_.invalidate();
+}
+
+void App::serviceItemActions() {
+    if (!itemInfoPending_ || backgroundJobActive())
+        return;
+    itemInfoPending_ = false;
+    if (screen_ != screens::Screen::ItemActions)
+        return;
+    if (!storage_.mounted() || usbTransfer_.active() || companionApi_.active() || serialCompanion_.active()) {
+        itemActions_.loaded(LibraryOrganization::Status::unknown, false);
+        return;
+    }
+    jobItemSelection_ = itemActions_.selected();
+    cancelItemInfo_ = false;
+    renderScreen(millis()); // Publish Checking before the read-only identity job.
+    if (!startBackgroundJob(JobKind::ItemInfo))
+        itemActions_.loaded(LibraryOrganization::Status::unknown, false);
+}
+
+void App::dispatchItemAction(screens::Action action) {
+    if (screen_ != screens::Screen::ItemActions || !itemActions_.ready() || backgroundJobActive() ||
+        !storage_.mounted() || usbTransfer_.active() || companionApi_.active() || serialCompanion_.active())
+        return;
+    const auto selected = itemActions_.selected();
+    if (selected.generation != storage_.generation() || storage_.findBook(selected.path) < 0) {
+        itemActions_.failed();
+        return;
+    }
+    const auto command = action == screens::Action::MarkRead     ? ReadingOrganization::Command::markRead
+                         : action == screens::Action::MarkUnread ? ReadingOrganization::Command::markUnread
+                                                                 : ReadingOrganization::Command::startAgain;
+    auto& session = readerScreen_.session;
+    if (itemActions_.recovery() && command != ReadingOrganization::Command::startAgain)
+        return;
+    if (session.organization && !session.restartBlocked && !itemActions_.recovery() &&
+        session.organization->path == selected.path && session.organization->source == selected.source) {
+        if (requestReadingAction(command, *session.organization)) {
+            manualItemCommand_ = true;
+            if (command == ReadingOrganization::Command::startAgain) {
+                if (itemActions_.origin() == screens::Screen::Library) {
+                    readerFromLibrary_ = true;
+                    libraryScreen_.rememberReaderOrigin();
+                    readerLibraryPath_ = selected.path;
+                }
+            }
+        } else
+            itemActions_.failed();
+    } else if (command == ReadingOrganization::Command::startAgain) {
+        restartAfterOpen_ = true;
+        if (itemActions_.origin() == screens::Screen::Library) {
+            readerFromLibrary_ = true;
+            libraryScreen_.rememberReaderOrigin();
+            readerLibraryPath_ = selected.path;
+        }
+        runBookOpen(selected, millis());
+    } else {
+        jobItemSelection_ = selected;
+        jobItemCommand_ = command;
+        jobItemOperation_ = "m" + std::to_string(readingOperationNonce_) + "-" + std::to_string(++readingOperation_);
+        if (!startBackgroundJob(JobKind::LibraryAction))
+            itemActions_.failed();
+    }
+}
+
+void App::finishOpenedBook() {
+    if (readerFromLibrary_)
+        readerLibraryPath_ = readerScreen_.session.sourcePath();
+    ReadingLoop::pause(readerScreen_.session);
+    statusUntilMs_ = 0;
+    if (!restartAfterOpen_) {
+        screen_ = screens::Screen::Reader;
+        return;
+    }
+    restartAfterOpen_ = false;
+    screen_ = screens::Screen::ItemActions;
+    if (readerScreen_.session.organization &&
+        readerScreen_.session.organization->path == itemActions_.selected().path &&
+        readerScreen_.session.organization->source == itemActions_.selected().source &&
+        requestReadingAction(ReadingOrganization::Command::startAgain, *readerScreen_.session.organization))
+        manualItemCommand_ = true;
+    else
+        itemActions_.failed();
+}
+
 void App::saveLibraryViews() {
     if (!storage_.mounted() || usbTransfer_.active() || backgroundJobActive() || serialCompanion_.active() || companionApi_.active()) return;
     if (auto saved = libraryScreen_.saveViews(Board::Storage::filesystem()); !saved)
@@ -980,10 +1218,15 @@ void App::runRss() {
 }
 
 void App::runBookOpen(const LibraryView::Selection& selected, uint32_t nowMs) {
-    const auto index = LibraryView::resolve(selected, storage_.generation(), libraryScreen_.view().rows());
-    if (!storage_.mounted() || !index || *index >= storage_.books().size()
-        || storage_.books()[*index].path != selected.path) {
-        showTransientStatus(immediateUi_.text(UiText::Library), immediateUi_.text(UiText::BookFailed), {}, 1200, screens::Screen::Library);
+    const int found = selected.generation == storage_.generation() ? storage_.findBook(selected.path) : -1;
+    const auto index = found >= 0 ? std::optional<size_t>{static_cast<size_t>(found)} : std::nullopt;
+    if (!storage_.mounted() || !index || *index >= storage_.books().size() ||
+        storage_.books()[*index].path != selected.path) {
+        const auto destination = restartAfterOpen_ ? screens::Screen::ItemActions : screens::Screen::Library;
+        restartAfterOpen_ = false;
+        itemActions_.failed();
+        showTransientStatus(immediateUi_.text(UiText::Library), immediateUi_.text(UiText::BookFailed), {}, 1200,
+                            destination);
         return;
     }
     const BookLibrary::Entry& book = storage_.books()[*index];
@@ -1005,9 +1248,13 @@ void App::runBookOpen(const LibraryView::Selection& selected, uint32_t nowMs) {
     screen_ = screens::Screen::Status;
     statusUntilMs_ = 0;
     readerScreen_.prepareBookOpen(prefs_, nowMs);
-    if (!startBackgroundJob(JobKind::Book))
+    if (!startBackgroundJob(JobKind::Book)) {
+        const auto destination = restartAfterOpen_ ? screens::Screen::ItemActions : screens::Screen::Library;
+        restartAfterOpen_ = false;
+        itemActions_.failed();
         showTransientStatus(immediateUi_.text(UiText::BookFailed), BookLibrary::displayName(book),
-                            immediateUi_.text(UiText::CheckSdCard), 1200, screens::Screen::Library);
+                            immediateUi_.text(UiText::CheckSdCard), 1200, destination);
+    }
 }
 
 void App::enterUsbTransfer(uint32_t nowMs) {
@@ -1053,6 +1300,8 @@ void App::exitUsbTransfer(screens::Screen destination) {
         if (auto recovered = FeedOrganization::recover(*filesystem); !recovered)
             Logger::failure("rss", "recover import", LibraryOrganization::kImportPath, recovered.error());
 #endif
+        readerFromLibrary_ = false;
+        readerLibraryPath_.clear();
         readerScreen_.loadInitialBook(immediateUi_, storage_, prefs_, millis());
         reconcileReadingOrder();
     } else {

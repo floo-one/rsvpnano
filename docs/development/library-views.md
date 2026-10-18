@@ -1,5 +1,7 @@
 # Library collection model and preparation (T04)
 
+This is the T04 receipt. The subsequent [T05 library UI receipt](library-ui.md) documents the implemented list, contextual navigation and Item actions.
+
 Implemented locally on 2026-10-18 following T01–T03. Hardware remains unflashed. This slice implements the collection data/controller boundary and integrates preparation and safe opening into App. The existing shelf/watch presentation remains in place: T05 connects the new collection APIs to the 2.5-row list, contextual rail, Back hierarchy and Item actions. Passing these tests does not certify those future renderers or physical touch behavior.
 
 ## Behavior

@@ -3017,3 +3017,98 @@ Japanese = "間隔"
 Korean = "간격"
 ChineseSimplified = "间距"
 ChineseTraditional = "間距"
+
+[[strings]]
+key = "LibraryBooks"
+context = "Library MVP navigation and item actions."
+English = "Books"
+
+[[strings]]
+key = "Newsletters"
+context = "Library MVP navigation and item actions."
+English = "Newsletters"
+
+[[strings]]
+key = "NeedsReview"
+context = "Library MVP navigation and item actions."
+English = "Needs review"
+
+[[strings]]
+key = "OtherArticles"
+context = "Library MVP navigation and item actions."
+English = "Other articles"
+
+[[strings]]
+key = "Unread"
+context = "Library MVP navigation and item actions."
+English = "Unread"
+
+[[strings]]
+key = "LibraryBack"
+context = "Library MVP navigation and item actions."
+English = "Back"
+
+[[strings]]
+key = "ItemActions"
+context = "Library MVP navigation and item actions."
+English = "Item actions"
+
+[[strings]]
+key = "MarkRead"
+context = "Library MVP navigation and item actions."
+English = "Mark read"
+
+[[strings]]
+key = "MarkUnread"
+context = "Library MVP navigation and item actions."
+English = "Mark unread"
+
+[[strings]]
+key = "StartAgain"
+context = "Library MVP navigation and item actions."
+English = "Start again"
+
+[[strings]]
+key = "KeepPosition"
+context = "Library MVP navigation and item actions."
+English = "Keep position"
+
+[[strings]]
+key = "ResetPosition"
+context = "Library MVP navigation and item actions."
+English = "Reset position to beginning"
+
+[[strings]]
+key = "HoldForActions"
+context = "Library MVP navigation and item actions."
+English = "Hold for actions"
+
+[[strings]]
+key = "PreviousStatusUnknown"
+context = "Library MVP navigation and item actions."
+English = "Previous status unknown"
+
+[[strings]]
+key = "NoItemsInTab"
+context = "Library MVP navigation and item actions."
+English = "No items in this tab"
+
+[[strings]]
+key = "SavedNewsletter"
+context = "Library MVP navigation and item actions."
+English = "Saved newsletter"
+
+[[strings]]
+key = "LibraryItems"
+context = "Library MVP navigation and item actions."
+English = "items"
+
+[[strings]]
+key = "OrganizationUnavailable"
+context = "Library MVP navigation and item actions."
+English = "Status unavailable"
+
+[[strings]]
+key = "LibrarySaveFailed"
+context = "Library MVP navigation and item actions."
+English = "List position not saved"

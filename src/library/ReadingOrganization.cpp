@@ -78,7 +78,10 @@ namespace {
         auto r = loadItem(fs, target.path, target.source);
         if (!r && missing(r.error())) {
             Item legacy;
-            legacy.path = target.path; legacy.source = target.source; legacy.indexed = indexed(target.indexed);
+            legacy.path = target.path;
+            legacy.source = target.source;
+            if (target.indexed.sourceSize && target.indexed.wordCount)
+                legacy.indexed = indexed(target.indexed);
             legacy.status = Status::unknown; legacy.unknown_reason = "legacy-unclassified";
             return legacy; // Opening alone never writes or labels it Unread.
         }
@@ -136,6 +139,9 @@ std::expected<Item, std::error_code> apply(fs::FS& fs, const Request& request, c
     }
     if (request.target != current || !current.generation || request.activity != currentActivity)
         return std::unexpected(make_error_code(Error::stale_identity));
+    if (request.command != Command::markRead && request.command != Command::markUnread &&
+        (!current.indexed.sourceSize || !current.indexed.wordCount))
+        return std::unexpected(std::make_error_code(std::errc::invalid_argument));
     // Full source validation is job work, never touch/paint work. It also catches
     // same-name, same-size replacement after companion/USB access.
     auto source = hashSource(fs, current.path, proceed);
@@ -182,7 +188,9 @@ std::expected<Item, std::error_code> apply(fs::FS& fs, const Request& request, c
         break;
     case Command::startAgain: break;
     }
-    item.unknown_reason.clear(); item.indexed = indexed(current.indexed);
+    item.unknown_reason.clear();
+    if (current.indexed.sourceSize && current.indexed.wordCount)
+        item.indexed = indexed(current.indexed);
     item.last_operation = request.operation;
     return saveItem(fs, item, item.revision);
 }

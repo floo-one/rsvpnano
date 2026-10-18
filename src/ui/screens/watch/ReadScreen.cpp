@@ -11,11 +11,10 @@ namespace screens {
                      resumeHeight},
                     title, author, watch::textSize(ui)))
             return Action::Resume;
-        const bool narrow = area.w < 240;
         ui::Grid actions{{area.x, static_cast<int16_t>(area.y + resumeHeight + 6), area.w,
                           static_cast<int16_t>(area.h - resumeHeight - 6)},
-                         static_cast<uint8_t>(narrow ? 1 : 3),
-                         static_cast<int16_t>(narrow ? (area.h - resumeHeight - 18) / 3 : area.h - resumeHeight - 6),
+                         static_cast<uint8_t>(2),
+                         static_cast<int16_t>((area.h - resumeHeight - 12) / 2),
                          6};
         if (ui.card(actions.next(), ui.text(UiText::Library), {}, watch::textSize(ui)))
             screen = Screen::Library;
@@ -23,6 +22,8 @@ namespace screens {
             screen = Screen::Chapters;
         if (ui.card(actions.next(), ui.text(UiText::Typeface), {}, watch::textSize(ui)))
             screen = Screen::BookFonts;
+        if (ui.card(actions.next(), ui.text(UiText::ItemActions), {}, watch::textSize(ui)))
+            return Action::ItemActions;
         return Action::None;
     }
 } // namespace screens

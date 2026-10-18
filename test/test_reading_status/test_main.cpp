@@ -438,8 +438,96 @@ void restart_checkpoint_validates_before_overwriting_the_old_bookmark() {
     TEST_ASSERT_EQUAL_UINT32(1, ReadingStateStore::read(fs, path, indexIdentity)->reading.wordIndex);
 }
 
+void library_marks_work_without_opening_or_indexing_and_preserve_bookmark() {
+    fs::FS fs;
+    auto selected = target(fs);
+    selected.indexed = {};
+    // An uncertain legacy bookmark must be preserved byte-for-byte, even if it
+    // cannot be decoded. Classification does not require reading/opening content.
+    const auto bookmark = StoragePaths::bookStatePathFor(path);
+    fs.put(bookmark, "unrecognized old bookmark");
+    auto result = command(fs, selected, Command::markRead, "library-read");
+    TEST_ASSERT_TRUE(result.has_value());
+    TEST_ASSERT_TRUE(result->status == Status::read);
+    TEST_ASSERT_FALSE(result->indexed.has_value());
+    TEST_ASSERT_EQUAL_STRING("unrecognized old bookmark", fs.bytes(bookmark).c_str());
+    result = command(fs, selected, Command::markUnread, "library-unread");
+    TEST_ASSERT_TRUE(result.has_value());
+    TEST_ASSERT_TRUE(result->status == Status::unread);
+    TEST_ASSERT_EQUAL_STRING("unrecognized old bookmark", fs.bytes(bookmark).c_str());
+}
+void library_marks_preserve_existing_index_and_shared_memberships() {
+    fs::FS fs;
+    auto selected = target(fs);
+    auto initial = command(fs, selected, Command::started, "started");
+    TEST_ASSERT_TRUE(initial.has_value());
+    initial->memberships = {{"feed-a", 1, 0}, {"feed-b", 2, 0}};
+    auto saved = saveItem(fs, *initial, initial->revision);
+    TEST_ASSERT_TRUE(saved.has_value());
+    selected.indexed = {};
+    auto result = command(fs, selected, Command::markRead, "library-read");
+    TEST_ASSERT_TRUE(result.has_value());
+    TEST_ASSERT_TRUE(result->indexed == saved->indexed);
+    TEST_ASSERT_TRUE(result->memberships == saved->memberships);
+    TEST_ASSERT_TRUE(command(fs, selected, Command::markRead, "library-read") == result);
+}
+void library_reset_and_activity_require_a_successfully_opened_index() {
+    fs::FS fs;
+    auto selected = target(fs);
+    selected.indexed = {};
+    const auto before = diskSnapshot(fs);
+    for (auto cmd : {Command::startAgain, Command::started, Command::naturalEnd}) {
+        auto result = command(fs, selected, cmd, "invalid");
+        TEST_ASSERT_FALSE(result.has_value());
+        TEST_ASSERT_TRUE(result.error() == std::errc::invalid_argument);
+        TEST_ASSERT_TRUE(before == diskSnapshot(fs));
+    }
+}
+void library_source_replacement_or_removed_item_cannot_mark_a_neighbor() {
+    fs::FS fs;
+    auto selected = target(fs);
+    selected.indexed = {};
+    fs.put(path, "xyz");
+    const auto before = diskSnapshot(fs);
+    TEST_ASSERT_FALSE(command(fs, selected, Command::markRead, "replaced").has_value());
+    TEST_ASSERT_TRUE(before == diskSnapshot(fs));
+    fs.remove(path.c_str());
+    const auto removed = diskSnapshot(fs);
+    TEST_ASSERT_FALSE(command(fs, selected, Command::markUnread, "removed").has_value());
+    TEST_ASSERT_TRUE(removed == diskSnapshot(fs));
+}
+void library_pending_restart_blocks_status_correction_until_recovery() {
+    fs::FS fs;
+    auto selected = target(fs);
+    TEST_ASSERT_TRUE(ReadingStateStore::write(fs, path, {indexIdentity, {.wordIndex = 1}}).has_value());
+    // Install a valid durable intent explicitly, then exercise the production
+    // guard.
+    Item item;
+    item.path = path;
+    item.source = selected.source;
+    item.indexed = IndexIdentity{3, 42, 3};
+    item.status = Status::reading;
+    item.restart = RestartIntent{"restart", false, "", 0, 1};
+    TEST_ASSERT_TRUE(saveItem(fs, item, 0).has_value());
+    selected.indexed = {};
+    const auto before = diskSnapshot(fs);
+    auto blocked = command(fs, selected, Command::markUnread, "correction");
+    TEST_ASSERT_FALSE(blocked.has_value());
+    TEST_ASSERT_TRUE(blocked.error() == make_error_code(Error::recovery_required));
+    TEST_ASSERT_TRUE(before == diskSnapshot(fs));
+    auto reopened = ReadingOrganization::prepare(fs, path, indexIdentity, 2);
+    TEST_ASSERT_TRUE(reopened.has_value());
+    TEST_ASSERT_FALSE(loadItem(fs, path, selected.source)->restart.has_value());
+    TEST_ASSERT_EQUAL(0, ReadingStateStore::read(fs, path, indexIdentity)->reading.wordIndex);
+}
+
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(library_marks_work_without_opening_or_indexing_and_preserve_bookmark);
+    RUN_TEST(library_marks_preserve_existing_index_and_shared_memberships);
+    RUN_TEST(library_reset_and_activity_require_a_successfully_opened_index);
+    RUN_TEST(library_source_replacement_or_removed_item_cannot_mark_a_neighbor);
+    RUN_TEST(library_pending_restart_blocks_status_correction_until_recovery);
     RUN_TEST(normal_open_does_not_infer_status);
     RUN_TEST(transitions_and_bookmark_preservation);
     RUN_TEST(restart_preserves_typography_and_is_idempotent);

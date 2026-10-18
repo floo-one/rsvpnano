@@ -226,6 +226,7 @@ void shared_screen_prepares_off_frame_and_invalidates_same_count() {
     for (int i=0;i<20;++i) TEST_ASSERT_EQUAL(4,screen.items(storage,store,session).size());
     TEST_ASSERT_EQUAL(0,io); TEST_ASSERT_EQUAL(4,storage.metadataReads);
     TEST_ASSERT_FALSE(screen.selection().has_value());
+    TEST_ASSERT_TRUE(screen.openCollection("needs-review", storage));
     ui::Touch start{.actions=ui::TouchStart}; screen.observeTouch(&start);
     auto selected=screen.selection(); TEST_ASSERT_TRUE(selected.has_value());
     storage.inventory[0].path="/library/books/replaced.txt"; ++storage.revision;
@@ -238,7 +239,8 @@ void shared_screen_prepares_off_frame_and_invalidates_same_count() {
     TEST_ASSERT_FALSE(screen.selection().has_value()); // release from the old gesture cannot open a neighbor
     TEST_ASSERT_TRUE(screen.openCollection("needs-review",storage));
     screen.observeTouch(&start); TEST_ASSERT_TRUE(screen.selection().has_value());
-    TEST_ASSERT_TRUE(screen.openCollection("books",storage)); TEST_ASSERT_TRUE(screen.items(storage,store,session).empty());
+    TEST_ASSERT_TRUE(screen.openCollection("books", storage));
+    TEST_ASSERT_TRUE(screen.view().order().empty());
 }
 void persisted_views_survive_each_interrupted_update() {
     const auto seed = [](fs::FS& fs, Model& model) {

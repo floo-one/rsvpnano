@@ -11,15 +11,16 @@
 #include "board/BoardPower.h"
 #include "companion/http/CompanionApi.h"
 #include "companion/serial/CompanionSerial.h"
+#include "feeds/RssFeeds.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "input/Input.h"
-#include "localization/LocaleCatalog.h"
-#include "feeds/RssFeeds.h"
-#include "settings/SettingsStore.h"
 #include "library/StorageManager.h"
+#include "localization/LocaleCatalog.h"
+#include "settings/SettingsStore.h"
 #include "ui/Ui.h"
 #include "ui/screens/ChaptersScreen.h"
+#include "ui/screens/ItemActionsScreen.h"
 #include "ui/screens/LibraryScreen.h"
 #include "ui/screens/ReaderScreen.h"
 #include "ui/screens/Screens.h"
@@ -46,6 +47,8 @@ private:
         Typography,
         ReadingOrganization,
         Library,
+        ItemInfo,
+        LibraryAction,
     };
 
     struct JobUpdate {
@@ -60,6 +63,10 @@ private:
     void renderScreen(uint32_t nowMs);
     void serviceReadingOrganization(uint32_t nowMs);
     void serviceLibrary();
+    void enterItemActions();
+    void serviceItemActions();
+    void dispatchItemAction(screens::Action);
+    void finishOpenedBook();
     void saveLibraryViews();
     void reconcileReadingOrder();
     void handleScreenAction(screens::Action action, uint32_t nowMs);
@@ -100,6 +107,7 @@ private:
     Board::Power::BatteryState battery_;
     screens::ReaderScreen readerScreen_{Board::Display::gfx(), settingsStore_.settings().reading};
     screens::LibraryScreen libraryScreen_;
+    screens::ItemActionsScreen itemActions_;
     screens::ChaptersScreen chaptersScreen_;
     screens::InterfaceScreen interfaceScreen_;
     screens::NetworkScreen networkScreen_;
@@ -126,6 +134,18 @@ private:
     LibraryView::Selection pendingBookSelection_;
     std::error_code jobLibraryError_;
     bool libraryWasVisible_ = false;
+    std::string readerLibraryPath_;
+    bool jobItemRecovery_ = false;
+    bool itemInfoPending_ = false;
+    bool manualItemCommand_ = false;
+    bool restartAfterOpen_ = false;
+    bool readerFromLibrary_ = false;
+    LibraryOrganization::Status jobItemStatus_ = LibraryOrganization::Status::unknown;
+    std::error_code jobItemError_;
+    LibraryView::Selection jobItemSelection_;
+    ReadingOrganization::Command jobItemCommand_ = ReadingOrganization::Command::markRead;
+    std::string jobItemOperation_;
+    std::atomic<bool> cancelItemInfo_{false};
     std::atomic<bool> cancelLibraryPreparation_{false};
     bool bookOpenPending_ = false;
     bool typographyRefreshPending_ = false;

@@ -27,8 +27,10 @@ namespace ReadingOrganization {
     std::expected<Target, std::error_code> prepare(fs::FS&, std::string_view path,
         const reading::BookIdentity&, uint64_t generation,
         const std::function<bool(uint64_t, uint64_t)>& proceed = {});
-    // current is the App-owned session snapshot. Reject stale generation/path/
-    // identity before I/O, then revalidate bytes before any persisted command.
+    // current is the App-owned session or selected-library snapshot. Reject stale
+    // generation/path/identity before I/O, then revalidate source bytes. Library
+    // Mark read/unread may omit indexed identity: preserve any existing index and
+    // bookmark without opening the book. Activity and Start again require an index.
     std::expected<LibraryOrganization::Item, std::error_code> apply(fs::FS&, const Request&, const Target& current,
         uint64_t currentActivity = 0, const std::function<bool(uint64_t, uint64_t)>& proceed = {});
     // Every legacy bookmark writer must consult this before writing. A pending
