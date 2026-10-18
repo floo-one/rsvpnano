@@ -17,8 +17,11 @@ namespace feedparser {
         std::string link;
         std::string author;
         std::string body;
+        bool bodyComplete = true;
+        std::string legacyIdentity; // Historical seen-key input; never used as matching proof.
     };
 
+    std::string feedTitle(std::string_view feedBody);
     bool hasCompleteFeed(std::string_view feedBody, size_t searchStart = 0);
     bool advancePastItem(std::string_view feedBody, size_t& searchStart);
 

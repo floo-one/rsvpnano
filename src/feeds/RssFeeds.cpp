@@ -12,10 +12,10 @@
 #include <string>
 #include <vector>
 #include "board/BoardStorage.h"
-#include "conversion/rsvp/RsvpWriter.h"
 
 #include "feeds/FeedParser.h"
-#include "feeds/FeedSync.h"
+#include "feeds/FeedOrganization.h"
+#include "library/BookLibrary.h"
 #include "feeds/RssConfig.h"
 #include "feeds/RssConfigStorage.h"
 #include "hash/Fnv1a.h"
@@ -24,7 +24,6 @@
 #include "storage/fs/StorageFiles.h"
 #include "storage/fs/StoragePaths.h"
 #include "text/AsciiText.h"
-#include "text/Utf8Text.h"
 
 namespace {
 
@@ -34,7 +33,6 @@ namespace {
     constexpr uint32_t kFeedIdleTimeoutMs = 15000;
     constexpr uint32_t kFeedProgressIntervalMs = 1000;
     constexpr size_t kMaxFeedBytes = 4UL * 1024UL * 1024UL;
-    constexpr uint8_t kMaxFeedsPerCheck = 8;
     constexpr uint8_t kMaxFeedRedirects = 3;
 
     constexpr const char* kUserAgent = "RSVP-Nano-RSS/1.0";
@@ -136,7 +134,7 @@ namespace {
     }
 
     std::string_view itemIdentity(const feedparser::FeedItem& item) {
-        return item.link.empty() ? item.title : item.link;
+        return !item.legacyIdentity.empty() ? item.legacyIdentity : item.link.empty() ? item.title : item.link;
     }
 
     std::string seenKeyForItem(const feedparser::FeedItem& item) {
@@ -149,32 +147,6 @@ namespace {
         return preferences.getBool(seenKeyForItem(item).c_str(), false);
     }
 
-    void markItemSeen(const feedparser::FeedItem& item, Preferences& preferences) {
-        preferences.putBool(seenKeyForItem(item).c_str(), true);
-    }
-
-    std::string filenameForItem(const feedparser::FeedItem& item) {
-        std::string cleaned =
-            StoragePaths::sanitizeFilename(std::string_view{item.title}.substr(0, std::min<size_t>(item.title.size(),
-                                                                                                   72)));
-        while (cleaned.contains("--")) {
-            const size_t position = cleaned.find("--");
-            cleaned.erase(position, 1);
-        }
-        if (cleaned.empty()) {
-            cleaned = "rss-article";
-        }
-        char suffix[16];
-        std::snprintf(suffix, sizeof(suffix), "-%08lx", static_cast<unsigned long>(Fnv1a::hash(itemIdentity(item))));
-        return cleaned + suffix + ".rsvp";
-    }
-
-    std::string metadataSafe(std::string value) {
-        std::ranges::replace(value, '\r', ' ');
-        std::ranges::replace(value, '\n', ' ');
-        return std::string{AsciiText::trim(value)};
-    }
-
     void report(RssFeeds::StatusCallback callback, void* context, const char* line1, const char* line2,
                 int progressPercent) {
         if (callback == nullptr) {
@@ -183,7 +155,8 @@ namespace {
         callback(context, kStatusTitle, line1, line2, progressPercent);
     }
 
-    std::expected<std::string, std::string> fetchUrl(std::string_view url, uint8_t feedIndex, uint8_t feedCount,
+    struct Fetched { std::string body, url; bool partial = false; };
+    std::expected<Fetched, std::string> fetchUrl(std::string_view url, uint8_t feedIndex, uint8_t feedCount,
                                                      RssFeeds::StatusCallback callback, void* context) {
         std::string currentUrl{url};
         for (uint8_t redirectCount = 0; redirectCount <= kMaxFeedRedirects; ++redirectCount) {
@@ -318,97 +291,46 @@ namespace {
                 const std::string downloaded = "Downloaded " + std::to_string(totalRead / 1024) + " KB";
                 report(callback, context, progressLabel.c_str(), downloaded.c_str(), 20 + feedIndex * 7);
             }
-            return body;
+            const bool partial = acceptedPartialFeed || totalRead >= kMaxFeedBytes || !feedparser::hasCompleteFeed(body);
+            return Fetched{std::move(body), std::move(currentUrl), partial};
         }
 
         return std::unexpected(std::string{"Feed redirected too often"});
     }
 
-    std::expected<void, std::error_code> saveItem(const feedparser::FeedItem& item, Preferences& preferences) {
-        if (auto directory = StorageFiles::ensureDirectory(StoragePaths::kLibraryPath); !directory)
-            return directory;
-        if (auto directory = StorageFiles::ensureDirectory(StoragePaths::kArticleFilesPath); !directory)
-            return directory;
-        const std::string finalPath = std::string(StoragePaths::kArticleFilesPath) + "/" + filenameForItem(item);
-        const std::string tmpPath = finalPath + ".tmp";
-        Board::Storage::filesystem().remove(tmpPath.c_str());
-
-        File file = Board::Storage::filesystem().open(tmpPath.c_str(), FILE_WRITE);
-        if (!file)
-            return std::unexpected(std::make_error_code(std::errc::io_error));
-
-        std::string body = item.body;
-        if (body.length() > feedparser::kMaxArticleChars) {
-            body.resize(Utf8Text::prefix(body, feedparser::kMaxArticleChars).size());
-            body += "\n\n[Article truncated on device.]";
-        }
-
-        const std::string title = metadataSafe(item.title);
-        const std::string author =
-            metadataSafe(item.author.empty() ? feedparser::sourceLabelForItem(item) : item.author);
-        const std::string source = metadataSafe(item.link);
-        RsvpWriter writer(file, {.source = source, .title = title, .author = author});
-        bool written = writer.writeChapter(title);
-        for (size_t start = 0; written && start < body.size();) {
-            const size_t end = body.find('\n', start);
-            std::string_view line{body.data() + start, (end == std::string::npos ? body.size() : end) - start};
-            if (!line.empty() && line.back() == '\r')
-                line.remove_suffix(1);
-            if (AsciiText::trim(line).empty())
-                writer.endParagraph();
-            else
-                written = writer.writeText(line, false);
-            start = end == std::string::npos ? body.size() : end + 1;
-        }
-        written = written && writer.finish() && writer.wordCount() > 0;
-        file.close();
-        if (!written) {
-            Board::Storage::filesystem().remove(tmpPath.c_str());
-            return std::unexpected(std::make_error_code(std::errc::io_error));
-        }
-
-        Board::Storage::filesystem().remove(finalPath.c_str());
-        if (!Board::Storage::filesystem().rename(tmpPath.c_str(), finalPath.c_str())) {
-            Board::Storage::filesystem().remove(tmpPath.c_str());
-            return std::unexpected(std::make_error_code(std::errc::io_error));
-        }
-
-        markItemSeen(item, preferences);
-        ESP_LOGI("rss", "saved %s", finalPath.c_str());
-        return {};
-    }
-
-    bool processFeed(std::string_view feedUrl, std::string_view feedBody, Preferences& preferences,
-                     RssFeeds::Result& result, uint8_t feedIndex, uint8_t feedCount, RssFeeds::StatusCallback callback,
-                     void* context) {
-        const std::string progressLabel = feedProgressLabel(feedIndex, feedCount);
-        report(callback, context, progressLabel.c_str(), "Parsing items", 24 + feedIndex * 7);
-        const auto synced = rss::syncFeed(
-            feedBody, rss::kMaxArticlesPerCheck - result.articlesSaved,
-            [&](const feedparser::FeedItem& item) {
-                return itemAlreadySeen(item, preferences);
+    bool processFeed(FeedOrganization::Feed feed, std::string_view feedBody, Preferences& preferences,
+                     FeedOrganization::Catalog& catalog, RssFeeds::Result& result, uint8_t feedIndex,
+                     uint8_t feedCount, RssFeeds::StatusCallback callback, void* context) {
+        const auto progressLabel = feedProgressLabel(feedIndex, feedCount);
+        report(callback, context, progressLabel.c_str(), "Matching articles", 24 + feedIndex * 7);
+        const auto synced = FeedOrganization::scan(Board::Storage::filesystem(), catalog, feed, feedBody,
+            FeedOrganization::kSaveBudget - result.articlesSaved,
+            [&](const feedparser::FeedItem& item, std::string_view identity, bool legacy) {
+                yield();
+                if (legacy) return itemAlreadySeen(item, preferences);
+                const auto key = "rs2" + std::string(identity.substr(0, 12));
+                // NVS's short key is only a bucket: compare the entire digest.
+                return std::string_view(preferences.getString(key.c_str()).c_str()) == identity;
             },
-            [&](const feedparser::FeedItem& item) {
-                report(callback, context, "Saving article", item.title.c_str(), 24 + feedIndex * 7);
-                const auto saved = saveItem(item, preferences);
-                if (!saved)
-                    Logger::failure("rss", "save article", StoragePaths::kArticleFilesPath, saved.error());
-                return saved.has_value();
+            [&](std::string_view identity) {
+                const auto key = "rs2" + std::string(identity.substr(0, 12));
+                preferences.putString(key.c_str(), std::string(identity).c_str());
             });
-        result.articlesSaved += static_cast<uint8_t>(synced.saved);
-        result.articlesSkipped += synced.skipped;
-        if (synced.scanned == 0) {
-            report(callback, context, progressLabel.c_str(), "No usable items", 24 + feedIndex * 7);
-        } else {
-            const std::string saved =
-                std::to_string(synced.saved) + " saved, " + std::to_string(synced.skipped) + " skipped";
-            report(callback, context, progressLabel.c_str(), saved.c_str(), 24 + feedIndex * 7);
+        if (!synced) {
+            Logger::failure("rss", "save feed progress", StoragePaths::kLibraryFeedsPath, synced.error());
+            result.partial = true;
+            report(callback, context, progressLabel.c_str(), "Feed storage failed", 24 + feedIndex * 7);
+            return false;
         }
-        ESP_LOGW("rss", "feed url=%.*s items=%u saved=%u skipped=%u", static_cast<int>(feedUrl.size()), feedUrl.data(),
-                 static_cast<unsigned int>(synced.scanned), static_cast<unsigned int>(synced.saved),
-                 static_cast<unsigned int>(synced.skipped));
+        result.articlesSaved += static_cast<uint8_t>(synced->saved);
+        result.articlesAssociated += synced->associated;
+        result.articlesSkipped += synced->skipped;
+        result.partial |= synced->partial;
+        const std::string detail = std::to_string(synced->saved) + " saved, " + std::to_string(synced->associated) + " linked"
+            + (synced->partial ? "; more pending" : "");
+        report(callback, context, progressLabel.c_str(), detail.c_str(), 24 + feedIndex * 7);
         delay(600);
-        return synced.scanned > 0;
+        return synced->failed == 0;
     }
 } // namespace
 
@@ -442,7 +364,27 @@ RssFeeds::Result RssFeeds::check(Preferences& preferences, const settings::Devic
         return result;
     }
 
-    const size_t feedCount = std::min(config->feeds.size(), static_cast<size_t>(kMaxFeedsPerCheck));
+    auto& filesystem = Board::Storage::filesystem();
+    for (const auto* path : {StoragePaths::kConfigPath, StoragePaths::kLibraryPath, StoragePaths::kArticleFilesPath}) {
+        if (auto directory = StorageFiles::ensureDirectory(path); !directory) {
+            net::disconnect(); result.summary = "Feed storage failed"; result.detail = "Check SD card"; return result;
+        }
+    }
+    auto registry = FeedOrganization::reconcile(filesystem, config->feeds);
+    auto recovered = FeedOrganization::recover(filesystem);
+    if (!registry || !recovered) {
+        net::disconnect(); result.summary = "Feed recovery required"; result.detail = "Check SD card"; return result;
+    }
+    BookLibrary::Listing inventory;
+    BookLibrary::refresh(inventory, false, RSVP_ON_DEVICE_DOCUMENT_CONVERSION);
+    std::vector<std::string> paths;
+    for (const auto& entry : inventory) if (BookLibrary::isArticle(entry)) paths.push_back(entry.path);
+    auto catalog = FeedOrganization::catalog(filesystem, paths);
+    if (!catalog) {
+        net::disconnect(); result.summary = "Feed metadata unavailable"; result.detail = "Check SD card"; return result;
+    }
+    const auto scheduled = FeedOrganization::attempts(*registry);
+    const size_t feedCount = scheduled.size();
     if (feedCount == 0) {
         net::disconnect();
         result.summary = "No feed URLs";
@@ -454,9 +396,14 @@ RssFeeds::Result RssFeeds::check(Preferences& preferences, const settings::Devic
     std::string firstFeedError;
     bool mixedFeedErrors = false;
 
-    for (uint8_t feedIndex = 0; feedIndex < feedCount && result.articlesSaved < rss::kMaxArticlesPerCheck;
+    for (uint8_t feedIndex = 0; feedIndex < feedCount && result.articlesSaved < FeedOrganization::kSaveBudget;
          ++feedIndex) {
-        const std::string& line = config->feeds[feedIndex];
+        const auto feed = std::ranges::find(registry->feeds, scheduled[feedIndex], &FeedOrganization::Feed::id);
+        const std::string& line = feed->url;
+        // Reserve the turn before network work: even a failed attempt advances.
+        if (auto advanced = FeedOrganization::attempted(filesystem, feed->id); !advanced) {
+            result.partial = true; ++feedFailures; firstFeedError = "Feed cursor save failed"; break;
+        }
         const uint8_t displayIndex = feedIndex + 1;
         const uint8_t displayFeedCount = static_cast<uint8_t>(feedCount);
         const std::string progressLabel = feedProgressLabel(displayIndex, displayFeedCount);
@@ -480,9 +427,15 @@ RssFeeds::Result RssFeeds::check(Preferences& preferences, const settings::Devic
         }
 
         ++result.feedsChecked;
-        processFeed(line, *feedBody, preferences, result, displayIndex, displayFeedCount, callback, context);
+        result.partial |= feedBody->partial;
+        auto scan = FeedOrganization::beginScan(filesystem, feed->id, feedBody->body);
+        if (!scan) { ++feedFailures; result.partial = true; firstFeedError = "Feed metadata save failed"; continue; }
+        scan->url = feedBody->url; // Relative links use the effective URL after redirects.
+        if (!processFeed(*scan, feedBody->body, preferences, *catalog, result, displayIndex, displayFeedCount, callback, context))
+            ++feedFailures;
     }
 
+    result.partial |= result.articlesSaved == FeedOrganization::kSaveBudget || config->feeds.size() > feedCount;
     net::disconnect();
 
     if (result.feedsChecked == 0) {
@@ -502,5 +455,7 @@ RssFeeds::Result RssFeeds::check(Preferences& preferences, const settings::Devic
             result.detail += ", " + std::to_string(feedFailures) + " failed";
         }
     }
+    if (result.articlesAssociated) result.detail += ", " + std::to_string(result.articlesAssociated) + " linked";
+    if (result.partial) result.detail += "; more pending";
     return result;
 }

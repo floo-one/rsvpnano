@@ -15,6 +15,8 @@ namespace RssFeeds {
         uint8_t feedsChecked = 0;
         uint8_t articlesSaved = 0;
         size_t articlesSkipped = 0;
+        size_t articlesAssociated = 0;
+        bool partial = false;
         std::string summary;
         std::string detail;
     };

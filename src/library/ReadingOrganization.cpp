@@ -204,6 +204,7 @@ std::expected<void, std::error_code> reconcileOrder(fs::FS& fs, std::span<const 
         if (!item) continue; // Unknown/corrupt records are never changed here.
         maximum = std::max({maximum, item->last_read_order, item->completed_order,
                             item->restart ? item->restart->order : 0});
+        for (const auto& membership : item->memberships) maximum = std::max(maximum, membership.batch);
     }
     if (maximum == UINT64_MAX) return std::unexpected(std::make_error_code(std::errc::value_too_large));
     if (r->revision && r->next_order > maximum) return {};

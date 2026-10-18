@@ -1,4 +1,5 @@
 #include "feeds/RssConfigStorage.h"
+#include "feeds/FeedOrganization.h"
 
 #include <FS.h>
 
@@ -14,11 +15,16 @@ namespace rss {
     }
 
     std::expected<void, std::error_code> save(fs::FS& filesystem, Config config) {
-        return encodeToml(std::move(config)).and_then([&](const std::string& content) {
+        if (auto normalized = normalize(config); !normalized) return normalized;
+        return encodeToml(config).and_then([&](const std::string& content) {
             return StorageFiles::ensureDirectory(StoragePaths::kConfigPath).and_then([&] {
                 return StorageFiles::writeFileAtomic(filesystem, StoragePaths::kRssConfigPath,
                                                      StoragePaths::kRssConfigTempPath,
-                                                     StoragePaths::kRssConfigBackupPath, content);
+                                                     StoragePaths::kRssConfigBackupPath, content).and_then([&]() -> std::expected<void, std::error_code> {
+                    auto reconciled = FeedOrganization::reconcile(filesystem, config.feeds);
+                    if (!reconciled) return std::unexpected(reconciled.error());
+                    return {};
+                });
             });
         });
     }

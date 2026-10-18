@@ -50,10 +50,13 @@ public:
     size_t write(const uint8_t* input, size_t length) {
         if (!node_ || isDirectory()) return 0;
         if (disk_->fails("write", path_)) length /= 2; // Real partial bytes survive.
-        node_->bytes.assign(reinterpret_cast<const char*>(input), length);
+        if (node_->bytes.size() < position_ + length) node_->bytes.resize(position_ + length);
+        std::memcpy(node_->bytes.data() + position_, input, length);
+        position_ += length;
         disk_->changed("write:" + path_);
         return length;
     }
+    bool seek(uint32_t position) { if (!node_ || position > node_->bytes.size()) return false; position_ = position; return true; }
     void flush() {
         if (node_) {
             if (disk_->fails("flush", path_)) node_->bytes.resize(node_->bytes.size() / 2);

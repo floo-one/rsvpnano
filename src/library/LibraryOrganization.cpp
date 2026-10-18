@@ -91,6 +91,7 @@ namespace LibraryOrganization {
             return true;
         }
         bool valid(const Item& r) {
+            if (!r.match_scope.empty() && !id(r.match_scope)) return false;
             if (!r.last_operation.empty() && !id(r.last_operation)) return false;
             if (!path(r.path) || !source(r.source) || r.memberships.size() > kMaxMemberships
                 || !text(r.unknown_reason, kMaxLabelBytes) || (!r.source_url.empty() && !url(r.source_url))
@@ -112,12 +113,22 @@ namespace LibraryOrganization {
                 return false;
             if (!std::ranges::all_of(r.feeds, [&](const Feed& f) {
                     return id(f.id) && url(f.url) && text(f.title, kMaxLabelBytes) && f.subscription_order > 0
-                        && f.subscription_order < r.next_order;
+                        && f.subscription_order < r.next_order
+                        && (f.scan_digest.empty() || digest(f.scan_digest)) && f.scan_cursor <= 4 * 1024 * 1024 && f.scan_position <= 4 * 1024 * 1024
+                        && (f.scan_digest.empty() ? f.scan_cursor == 0 && f.scan_position == 0 && f.scan_batch == 0 : f.scan_batch > 0)
+                        && f.scan_batch < r.next_order;
                 }) || !unique(r.feeds, [](const Feed& f) -> const std::string& { return f.id; })
                    || !unique(r.feeds, [](const Feed& f) -> const std::string& { return f.url; })) return false;
             return r.last_attempted_feed.empty() || std::ranges::any_of(r.feeds, [&](const Feed& f) {
                 return f.id == r.last_attempted_feed;
             });
+        }
+        bool valid(const Import& r) {
+            return valid(r.item) && r.item.revision == 1
+                && r.item.status == (r.existing_content ? Status::unknown : Status::unread)
+                && r.item.source.bytes > 0 && r.item.source.bytes <= kMaxImportBytes
+                && r.item.path.starts_with("/library/articles/") && !r.item.restart
+                && r.item.memberships.size() == 1 && !r.item.body_sha256.empty();
         }
         bool valid(const Views& r) {
             if (r.views.size() > kMaxViews
@@ -336,9 +347,8 @@ namespace LibraryOrganization {
         static ErrorCategory category;
         return {static_cast<int>(error), category};
     }
-    std::expected<SourceIdentity, std::error_code> hashSource(
+    static std::expected<SourceIdentity, std::error_code> hashFile(
         fs::FS& fs, std::string_view name, const std::function<bool(uint64_t, uint64_t)>& proceed) {
-        if (!path(name)) return std::unexpected(std::make_error_code(std::errc::invalid_argument));
         errno = 0;
         File file = fs.open(std::string{name}.c_str(), FILE_READ);
         if (!file) return std::unexpected(ioError());
@@ -364,6 +374,26 @@ namespace LibraryOrganization {
         std::array<char, 65> digest{};
         hash.getChars(digest.data());
         return SourceIdentity{total, digest.data()};
+    }
+    std::expected<SourceIdentity, std::error_code> hashSource(fs::FS& fs, std::string_view name,
+        const std::function<bool(uint64_t, uint64_t)>& proceed) {
+        if (!path(name)) return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+        return hashFile(fs, name, proceed);
+    }
+    std::expected<SourceIdentity, std::error_code> hashImportStage(fs::FS& fs) { return hashFile(fs, kImportStage, [](uint64_t, uint64_t total) { return total <= kMaxImportBytes; }); }
+    std::string hashBytes(std::string_view bytes) {
+        SHA256Builder hash; hash.begin();
+        for (size_t at = 0; at < bytes.size(); at += 512) {
+            const auto count = std::min<size_t>(512, bytes.size() - at);
+            hash.add(reinterpret_cast<const uint8_t*>(bytes.data() + at), count);
+        }
+        hash.calculate(); std::array<char, 65> result{}; hash.getChars(result.data()); return result.data();
+    }
+    std::expected<std::string, std::error_code> encode(const Import& r) { return encodeRecord(r); }
+    std::expected<Import, std::error_code> decodeImport(std::string_view s) { return decode<Import>(s); }
+    std::expected<Import, std::error_code> loadImport(fs::FS& fs, Recovery r) { return load<Import>(fs, kImportPath, AnyRecord{}, r); }
+    std::expected<Import, std::error_code> saveImport(fs::FS& fs, Import r, uint64_t revision) {
+        return save(fs, kImportPath, std::move(r), revision, AnyRecord{});
     }
     std::expected<std::string, std::error_code> encode(const Item& r) { return encodeRecord(r); }
     std::expected<std::string, std::error_code> encode(const Feeds& r) { return encodeRecord(r); }

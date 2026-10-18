@@ -86,6 +86,7 @@ namespace LibraryOrganization {
         std::vector<Membership> memberships;
         std::optional<RestartIntent> restart;
         std::string last_operation;
+        std::string match_scope; // Feed ID for linkless or incomplete bodies.
         bool operator==(const Item&) const = default;
     };
     struct Feed {
@@ -94,6 +95,10 @@ namespace LibraryOrganization {
         std::string title;
         bool active = false;
         uint64_t subscription_order = 0;
+        std::string scan_digest;
+        uint32_t scan_cursor = 0;
+        uint32_t scan_position = 0;
+        uint64_t scan_batch = 0;
         bool operator==(const Feed&) const = default;
     };
     struct Feeds {
@@ -104,6 +109,23 @@ namespace LibraryOrganization {
         std::vector<Feed> feeds;
         bool operator==(const Feeds&) const = default;
     };
+    // One serialized import owns the fixed hidden content stage. Retain the
+    // completed receipt; normal recovery does not reimport deleted content.
+    constexpr const char* kImportPath = "/config/library-import.toml";
+    constexpr size_t kMaxImportBytes = 2 * 1024 * 1024;
+    constexpr const char* kImportStage = "/library/articles/.feed-import.tmp";
+    struct Import {
+        uint32_t schema_version = kSchemaVersion;
+        uint64_t revision = 0;
+        Item item;
+        bool completed = false;
+        bool existing_content = false;
+        bool operator==(const Import&) const = default;
+    };
+    std::string hashBytes(std::string_view);
+    std::expected<SourceIdentity, std::error_code> hashImportStage(fs::FS&);
+    std::expected<std::string, std::error_code> encode(const Import&);
+    std::expected<Import, std::error_code> decodeImport(std::string_view);
     struct Anchor {
         Tab tab = Tab::invalid;
         std::string path;
@@ -140,6 +162,9 @@ namespace LibraryOrganization {
         // retry; unsupported/stale/unreadable stages remain blocked.
         stagedCreation,
     };
+
+    std::expected<Import, std::error_code> loadImport(fs::FS&, Recovery = Recovery::committedOnly);
+    std::expected<Import, std::error_code> saveImport(fs::FS&, Import, uint64_t expectedRevision);
 
     // Loads repair a missing/corrupt final from a validated backup. Unsupported,
     // stale or unreadable candidates block mutation. They are not corruption.

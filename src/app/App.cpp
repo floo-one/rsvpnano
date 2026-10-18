@@ -15,10 +15,13 @@
 #include "freertos/task.h"
 #include "logging/Logger.h"
 #include "feeds/RssFeeds.h"
+#include "feeds/FeedOrganization.h"
+#include "feeds/RssConfigStorage.h"
 #include "settings/NvsSecurity.h"
 #include "library/ReadingProgress.h"
 #include "library/ReadingStateStore.h"
 #include "storage/migration/Migration.h"
+#include "storage/fs/StoragePaths.h"
 #include "update/OtaUpdater.h"
 
 namespace {
@@ -92,6 +95,12 @@ void App::begin() {
         focusScreen_.begin(Board::Storage::filesystem());
     else
         focusScreen_.begin();
+#if !defined(RSVP_BENCHMARK_MODE)
+    if (storage_.mounted()) {
+        if (auto recovered = FeedOrganization::recover(Board::Storage::filesystem()); !recovered)
+            Logger::failure("rss", "recover import", LibraryOrganization::kImportPath, recovered.error());
+    }
+#endif
     readerScreen_.loadInitialBook(immediateUi_, storage_, prefs_, bootMs_);
     reconcileReadingOrder();
     Logger::startupCheckpoint("book");
@@ -184,6 +193,12 @@ void App::reconcileReadingOrder() {
     for (const auto& book : storage_.books()) paths.push_back(book.path);
     if (auto result = ReadingOrganization::reconcileOrder(Board::Storage::filesystem(), paths); !result)
         readerScreen_.session.organizationError = result.error();
+    auto config = rss::load(Board::Storage::filesystem());
+    if (config || config.error() == std::errc::no_such_file_or_directory) {
+        const std::vector<std::string> empty;
+        auto registry = FeedOrganization::reconcile(Board::Storage::filesystem(), config ? config->feeds : empty);
+        if (!registry) Logger::failure("rss", "reconcile feeds", StoragePaths::kLibraryFeedsPath, registry.error());
+    } else Logger::failure("rss", "load feeds", StoragePaths::kRssConfigPath, config.error());
 #endif
 }
 
@@ -957,6 +972,10 @@ void App::exitUsbTransfer(screens::Screen destination) {
     if (mounted) {
         readerScreen_.fonts.loadFromSd();
         focusScreen_.begin(*filesystem);
+#if !defined(RSVP_BENCHMARK_MODE)
+        if (auto recovered = FeedOrganization::recover(*filesystem); !recovered)
+            Logger::failure("rss", "recover import", LibraryOrganization::kImportPath, recovered.error());
+#endif
         readerScreen_.loadInitialBook(immediateUi_, storage_, prefs_, millis());
         reconcileReadingOrder();
     } else {

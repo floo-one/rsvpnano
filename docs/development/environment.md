@@ -42,3 +42,5 @@ Most core versions are pinned upstream; XPowersLib remains a moving Git dependen
 Run `.local/venv/bin/pio test -e native_library_test` for the real organization codec/recovery and fault-injection suite. The focused native environment also compiles the installed ESP32 SHA implementation through `tools/pio_native_library.py`; install the project framework with a board build first. See [foundation validation](library-foundation.md). This command does not upload firmware.
 
 Run `.local/venv/bin/pio test -e native_reading_status_test` for reader lifecycle, status commands and Start again recovery. See [reader integration validation](reading-status.md) for coverage boundaries and sanitizer commands. It uses the same installed framework prerequisite and does not upload firmware.
+
+Run `.local/venv/bin/pio test -e native_feed_organization_test` for registry, matching, shared progress, fair scans and import recovery. See [feed integration validation](feed-organization.md). The same installed ESP32 framework prerequisite applies; no firmware upload is performed.

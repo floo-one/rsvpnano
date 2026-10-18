@@ -190,6 +190,12 @@ namespace feedparser {
 
     } // namespace
 
+    std::string feedTitle(std::string_view body) {
+        ItemBounds first{};
+        const size_t end = findNextItem(body, 0, first) ? first.start : body.size();
+        return cleanText(valueBetween(body, "<title", "</title>", 0, end));
+    }
+
     bool hasCompleteFeed(std::string_view feedBody, size_t searchStart) {
         return indexOfIgnoreCase(feedBody, "</rss>", searchStart, feedBody.size()) != std::string_view::npos
             || indexOfIgnoreCase(feedBody, "</feed>", searchStart, feedBody.size()) != std::string_view::npos;
@@ -230,12 +236,31 @@ namespace feedparser {
             searchStart = bounds.next;
 
             item.title = cleanText(valueBetween(feedBody, "<title", "</title>", bounds.start, bounds.end));
+            auto legacyLink = cleanText(valueBetween(feedBody, "<link>", "</link>", bounds.start, bounds.end));
+            if (legacyLink.empty()) legacyLink = cleanText(attributeValue(feedBody, "<link", "href", bounds.start, bounds.end));
+            if (legacyLink.empty()) legacyLink = cleanText(valueBetween(feedBody, "<guid", "</guid>", bounds.start, bounds.end));
+            item.legacyIdentity = legacyLink.empty() ? item.title : legacyLink;
+            if (item.legacyIdentity.empty()) item.legacyIdentity = "RSS Article";
             item.link = cleanText(valueBetween(feedBody, "<link>", "</link>", bounds.start, bounds.end));
             if (item.link.empty()) {
-                item.link = cleanText(attributeValue(feedBody, "<link", "href", bounds.start, bounds.end));
+                size_t linkAt = indexOfIgnoreCase(feedBody, "<link", bounds.start, bounds.end);
+                while (linkAt != std::string_view::npos && item.link.empty()) {
+                    const auto end = tagEndIndex(feedBody, linkAt, bounds.end);
+                    if (end == std::string_view::npos) break;
+                    if (opensTag(feedBody.substr(linkAt + 1), "link")) {
+                        auto rel = attributeValue(feedBody, "<link", "rel", linkAt, end + 1);
+                        std::ranges::transform(rel, rel.begin(), [](char c) { return AsciiText::toLower(c); });
+                        if (rel.empty() || rel == "alternate")
+                            item.link = cleanText(attributeValue(feedBody, "<link", "href", linkAt, end + 1));
+                    }
+                    linkAt = indexOfIgnoreCase(feedBody, "<link", end + 1, bounds.end);
+                }
             }
             if (item.link.empty()) {
-                item.link = cleanText(valueBetween(feedBody, "<guid", "</guid>", bounds.start, bounds.end));
+                auto guid = cleanText(valueBetween(feedBody, "<guid", "</guid>", bounds.start, bounds.end));
+                auto permalink = attributeValue(feedBody, "<guid", "isPermaLink", bounds.start, bounds.end);
+                std::ranges::transform(permalink, permalink.begin(), [](char c) { return AsciiText::toLower(c); });
+                if (permalink != "false" && (guid.starts_with("https://") || guid.starts_with("http://"))) item.link = std::move(guid);
             }
             item.author = cleanText(valueBetween(feedBody, "<author", "</author>", bounds.start, bounds.end));
             if (item.author.empty()) {
@@ -246,6 +271,8 @@ namespace feedparser {
                 item.author = sourceLabelForItem(item);
             }
 
+            item.bodyComplete = bounds.end - bounds.start <= kMaxArticleChars
+                && indexOfIgnoreCase(feedBody, "xml:base", 0, bounds.end) == std::string_view::npos;
             item.body =
                 cleanText(valueBetween(feedBody, "<content:encoded", "</content:encoded>", bounds.start, bounds.end));
             if (item.body.empty()) {
@@ -260,6 +287,7 @@ namespace feedparser {
             }
             if (item.body.empty()) {
                 item.body = item.link;
+                item.bodyComplete = false;
             }
 
             if (item.title.empty()) {
