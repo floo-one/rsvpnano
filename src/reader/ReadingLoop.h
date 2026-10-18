@@ -22,6 +22,8 @@ namespace ReadingLoop {
     void begin(ReadingSession& session, uint32_t nowMs);
     void start(ReadingSession& session, uint32_t nowMs);
     void pause(ReadingSession& session);
+    void pageActivity(ReadingSession& session);
+    void clearActivity(ReadingSession& session);
     bool update(ReadingSession& session, const settings::ReadingSettings& settings, uint32_t nowMs,
                 bool allowCatchUp = true);
     void setWords(ReadingSession& session, std::span<const std::string> words, uint32_t nowMs);

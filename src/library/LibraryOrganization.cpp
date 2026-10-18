@@ -91,6 +91,7 @@ namespace LibraryOrganization {
             return true;
         }
         bool valid(const Item& r) {
+            if (!r.last_operation.empty() && !id(r.last_operation)) return false;
             if (!path(r.path) || !source(r.source) || r.memberships.size() > kMaxMemberships
                 || !text(r.unknown_reason, kMaxLabelBytes) || (!r.source_url.empty() && !url(r.source_url))
                 || (!r.body_sha256.empty() && !digest(r.body_sha256))) return false;
@@ -376,6 +377,22 @@ namespace LibraryOrganization {
     }
     std::expected<Feeds, std::error_code> loadFeeds(fs::FS& fs, Recovery r) {
         return load<Feeds>(fs, StoragePaths::kLibraryFeedsPath, AnyRecord{}, r);
+    }
+    std::expected<Item, std::error_code> inspectItem(fs::FS& fs, std::string_view name) {
+        if (!path(name)) return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+        const auto check = [name](const Item& item) -> std::expected<void, std::error_code> {
+            if (item.path != name) return std::unexpected(make_error_code(Error::stale_identity));
+            return {};
+        };
+        const auto final = StoragePaths::libraryOrganizationPathFor(name);
+        auto record = read<Item>(fs, final, check);
+        if (record || (!missing(record.error()) && !damaged(record.error()))) return record;
+        auto backup = read<Item>(fs, final + ".bak", check);
+        if (backup || !missing(backup.error())) return backup;
+        auto stage = read<Item>(fs, final + ".tmp", check);
+        if (stage) return std::unexpected(make_error_code(Error::recovery_required));
+        if (!missing(stage.error())) return stage;
+        return record;
     }
     std::expected<Views, std::error_code> loadViews(fs::FS& fs, Recovery r) {
         return load<Views>(fs, StoragePaths::kLibraryViewPath, AnyRecord{}, r);

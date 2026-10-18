@@ -30,6 +30,8 @@ namespace ReadingProgress {
                                                                 std::vector<settings::LanguageFont> languageFonts);
     void save(ReadingSession& session, Preferences& preferences, bool force, uint32_t nowMs);
     void cache(ReadingSession& session, Preferences& preferences, uint32_t wordIndex);
+    std::expected<void, std::error_code> mirrorChecked(const ReadingSession& session, const IndexedBookStore& store);
+    std::expected<void, std::error_code> checkpointRestart(const ReadingSession& session, const IndexedBookStore& store);
     void mirror(const ReadingSession& session, const IndexedBookStore& store);
     uint32_t restore(ReadingSession& session, const IndexedBookStore& store);
     bool saveChapterTransition(ReadingSession& session, Preferences& preferences, const IndexedBookStore& store,

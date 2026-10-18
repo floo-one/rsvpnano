@@ -30,6 +30,9 @@ class App {
 public:
     void begin();
     void update(uint32_t nowMs);
+    // Shared action-screen boundary. Memory-only enqueue; the App job performs
+    // I/O after the frame. Currently targets a successfully opened, paused item.
+    bool requestReadingAction(ReadingOrganization::Command, const ReadingOrganization::Target&);
 
 private:
     enum class JobKind : uint8_t {
@@ -40,6 +43,7 @@ private:
         OtaInstall,
         Book,
         Typography,
+        ReadingOrganization,
     };
 
     struct JobUpdate {
@@ -52,6 +56,8 @@ private:
     };
 
     void renderScreen(uint32_t nowMs);
+    void serviceReadingOrganization(uint32_t nowMs);
+    void reconcileReadingOrder();
     void handleScreenAction(screens::Action action, uint32_t nowMs);
     void handleInput(Input::ActionMask actions, uint32_t nowMs);
     void handleTouch(uint32_t nowMs);
@@ -103,6 +109,13 @@ private:
     screens::StandbyScreen standbyScreen_;
     QueueHandle_t jobQueue_ = nullptr;
     JobKind jobKind_ = JobKind::None;
+    std::optional<ReadingOrganization::Request> queuedReadingCommand_;
+    ReadingOrganization::Request jobReadingCommand_;
+    std::error_code jobReadingError_;
+    std::optional<reading::State> jobRestartState_;
+    bool jobResumeReading_ = false;
+    uint32_t readingOperationNonce_ = 0;
+    uint64_t readingOperation_ = 0;
     size_t jobBookIndex_ = 0;
     bool jobBookLoaded_ = false;
     size_t pendingBookIndex_ = 0;

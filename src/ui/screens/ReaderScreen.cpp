@@ -1,4 +1,5 @@
 #include "ui/screens/ReaderScreen.h"
+#include "board/BoardStorage.h"
 #include <esp_log.h>
 
 #include <algorithm>
@@ -380,6 +381,7 @@ namespace screens {
             status(ui, ui.text(UiText::BookFailed), BookLibrary::displayName(book), ui.text(UiText::CheckSdCard));
             return false;
         }
+        prepareOrganization();
         finishBookOpen(preferences, nowMs);
         refreshTypography();
         return true;
@@ -398,6 +400,20 @@ namespace screens {
         ReadingProgress::mirror(session, store);
         store.close();
         session.metadata.clear();
+        ReadingLoop::pause(session);
+        ReadingLoop::clearActivity(session);
+        session.organization.reset();
+        preparedOrganization.reset();
+        preparedOrganizationError.clear();
+    }
+
+    void ReaderScreen::prepareOrganization() {
+#if !defined(RSVP_BENCHMARK_MODE)
+        auto prepared = ReadingOrganization::prepare(Board::Storage::filesystem(), store.sourcePath(), store.identity(), 1,
+            [](uint64_t processed, uint64_t) { if (processed % (64 * 1024) == 0) yield(); return true; });
+        preparedOrganizationError = prepared ? std::error_code{} : prepared.error();
+        preparedOrganization = prepared ? std::optional{std::move(*prepared)} : std::nullopt;
+#endif
     }
 
     void ReaderScreen::finishBookOpen(Preferences& preferences, uint32_t nowMs) {
@@ -405,6 +421,15 @@ namespace screens {
         pagePreview_ = false;
         session.lastSavedWordIndex = static_cast<size_t>(-1);
         ReadingLoop::setBookStore(session, store, nowMs);
+        session.organization = std::move(preparedOrganization);
+        session.organizationError = preparedOrganizationError;
+        if (session.organization) session.organization->generation = session.generation;
+#if !defined(RSVP_BENCHMARK_MODE)
+        // An unresolved intent must not restore/publish an old bookmark or play.
+        const auto guard = ReadingOrganization::allowBookmarkWrite(Board::Storage::filesystem(), session.sourcePath());
+        session.restartBlocked = !guard;
+        if (session.restartBlocked) return;
+#endif
 
         const uint32_t savedWord = ReadingProgress::restore(session, store);
         if (savedWord != ReadingProgress::kNoSavedWordIndex) {
@@ -1006,6 +1031,9 @@ namespace screens {
     }
 
     void ReaderScreen::finishPause(Preferences& preferences, uint32_t nowMs) {
+        // Both the input and frame paths can finish a sentence-end pause.
+        if (ReadingLoop::atEnd(session) && shouldFinishPause(nowMs))
+            ReadingLoop::update(session, settings_, nowMs, false);
         ReadingLoop::pause(session);
         pauseAtSentenceEndRequested_ = false;
         playLocked_ = false;
@@ -1046,8 +1074,8 @@ namespace screens {
         paragraphRemainder_ += rate * static_cast<int32_t>(elapsed);
         const int steps = paragraphRemainder_ / kParagraphScrollScale;
         paragraphRemainder_ %= kParagraphScrollScale;
-        if (steps != 0)
-            ReadingLoop::seekParagraph(session, steps);
+        if (steps != 0 && ReadingLoop::seekParagraph(session, steps))
+            ReadingLoop::pageActivity(session);
     }
 
     int ReaderScreen::scrubSteps(int deltaX) const {

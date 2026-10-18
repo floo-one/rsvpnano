@@ -824,7 +824,20 @@ namespace ReadingLoop {
     namespace {
 
         bool usingLoadedBook(const ReadingSession& session) {
-            return session.bookStore != nullptr || !session.words.empty();
+            return session.bookStore != nullptr || session.loadedWords;
+        }
+
+        void newGeneration(ReadingSession& session) {
+            // Reader sessions are attached/detached on the application thread.
+            static uint64_t generation = 0;
+            session.generation = ++generation;
+            session.activity = 0;
+            session.readingStarted = session.naturalEnd = session.resetWordClock = false;
+            session.organization.reset();
+            session.failedOrganization.reset();
+            session.organizationError.clear();
+            session.organizationErrorReported = false;
+            session.restartBlocked = false;
         }
 
         bool nextWordStartsLowercaseAt(const ReadingSession& session, size_t wordIndex) {
@@ -899,6 +912,8 @@ namespace ReadingLoop {
     } // namespace
 
     void begin(ReadingSession& session, uint32_t nowMs) {
+        newGeneration(session);
+        session.loadedWords = false;
         session.playing = false;
         session.state.wordIndex = 0;
         session.lastAdvanceMs = nowMs;
@@ -906,6 +921,8 @@ namespace ReadingLoop {
     }
 
     void setWords(ReadingSession& session, std::span<const std::string> words, uint32_t nowMs) {
+        newGeneration(session);
+        session.loadedWords = true;
         session.state.wordIndex = 0;
         session.lastAdvanceMs = nowMs;
         session.words = words;
@@ -915,6 +932,8 @@ namespace ReadingLoop {
     }
 
     void setBookStore(ReadingSession& session, const IndexedBookStore& store, uint32_t nowMs) {
+        newGeneration(session);
+        session.loadedWords = false;
         session.state.wordIndex = 0;
         session.lastAdvanceMs = nowMs;
         session.words = {};
@@ -924,6 +943,10 @@ namespace ReadingLoop {
     }
 
     void start(ReadingSession& session, uint32_t nowMs) {
+        if (session.playing || session.restartBlocked || wordCount(session) == 0) return;
+        ++session.activity;
+        session.readingStarted = true;
+        session.resetWordClock = false;
         session.lastAdvanceMs = nowMs;
         session.playing = true;
     }
@@ -931,8 +954,23 @@ namespace ReadingLoop {
     void pause(ReadingSession& session) {
         session.playing = false;
     }
+    void pageActivity(ReadingSession& session) {
+        if (session.restartBlocked || wordCount(session) == 0 || session.readingStarted) return;
+        ++session.activity;
+        session.readingStarted = true;
+    }
+    void clearActivity(ReadingSession& session) {
+        ++session.activity;
+        session.readingStarted = session.naturalEnd = false;
+    }
 
     bool update(ReadingSession& session, const settings::ReadingSettings& settings, uint32_t nowMs, bool allowCatchUp) {
+        if (!session.playing || wordCount(session) == 0 || session.restartBlocked) return false;
+        if (session.resetWordClock) {
+            session.lastAdvanceMs = nowMs;
+            session.resetWordClock = false;
+            return false;
+        }
         bool changed = false;
         const uint8_t maxCatchUpWords = allowCatchUp ? kMaxCatchUpWords : 1;
         for (uint8_t catchUp = 0; catchUp < maxCatchUpWords; ++catchUp) {
@@ -940,6 +978,11 @@ namespace ReadingLoop {
             if (durationMs == 0 || nowMs - session.lastAdvanceMs < durationMs)
                 break;
             session.lastAdvanceMs += durationMs;
+            if (usingLoadedBook(session) && atEnd(session)) {
+                session.playing = false;
+                session.naturalEnd = true;
+                return true;
+            }
             if (!advance(session, 1))
                 break;
             changed = true;
@@ -984,6 +1027,7 @@ namespace ReadingLoop {
     }
 
     void seekTo(ReadingSession& session, size_t wordIndex) {
+        session.resetWordClock = session.playing;
         const size_t count = wordCount(session);
         if (count == 0) {
             session.currentWord.clear();
@@ -994,6 +1038,7 @@ namespace ReadingLoop {
     }
 
     void seekRelative(ReadingSession& session, size_t baseIndex, int steps) {
+        session.resetWordClock = session.playing;
         const size_t count = wordCount(session);
         if (count == 0)
             return;
@@ -1059,7 +1104,7 @@ namespace ReadingLoop {
     size_t wordCount(const ReadingSession& session) {
         if (session.bookStore != nullptr)
             return session.bookStore->wordCount();
-        if (!session.words.empty())
+        if (session.loadedWords)
             return session.words.size();
         return kDemoWordCount;
     }
@@ -1067,7 +1112,7 @@ namespace ReadingLoop {
     std::string_view wordAt(const ReadingSession& session, size_t index) {
         if (session.bookStore != nullptr)
             return session.bookStore->wordAt(index);
-        if (!session.words.empty())
+        if (session.loadedWords)
             return session.words[index];
         return kDemoWords[index];
     }

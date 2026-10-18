@@ -37,7 +37,12 @@ namespace screens {
         bool openBook(ui::Context& ui, StorageManager& storage, Preferences& preferences, size_t index, uint32_t nowMs);
         void closeBook();
         void prepareBookOpen(Preferences& preferences, uint32_t nowMs);
+        void prepareOrganization();
         void finishBookOpen(Preferences& preferences, uint32_t nowMs);
+        // Prepared by the book job, published only by finishBookOpen().
+        std::optional<ReadingOrganization::Target> preparedOrganization;
+        std::error_code preparedOrganizationError;
+
         void loadInitialBook(ui::Context& ui, StorageManager& storage, Preferences& preferences, uint32_t nowMs);
         void draw(ui::Context& ui, const StorageManager& storage, const Board::Power::BatteryState& battery,
                   uint32_t nowMs);

@@ -61,13 +61,14 @@ namespace LibraryOrganization {
         uint32_t position = 0;
         bool operator==(const Membership&) const = default;
     };
-    // Data only. T02 will execute this intent after a successful paused open.
+    // ReadingOrganization executes this intent after a successful paused open.
     // Preserve the exact prior bookmark (including typography), not just its index.
     struct RestartIntent {
         std::string operation_id;
         bool had_bookmark = false;
         std::string previous_bookmark;
         uint32_t desired_word_index = 0;
+        uint64_t order = 0;
         bool operator==(const RestartIntent&) const = default;
     };
     struct Item {
@@ -84,6 +85,7 @@ namespace LibraryOrganization {
         uint64_t completed_order = 0;
         std::vector<Membership> memberships;
         std::optional<RestartIntent> restart;
+        std::string last_operation;
         bool operator==(const Item&) const = default;
     };
     struct Feed {
@@ -143,6 +145,9 @@ namespace LibraryOrganization {
     // stale or unreadable candidates block mutation. They are not corruption.
     std::expected<Item, std::error_code> loadItem(fs::FS&, std::string_view path,
                                                 const SourceIdentity&, Recovery = Recovery::committedOnly);
+    // Read-only inspection for write guards/order reconstruction. Checks path
+    // and record integrity, but does NOT validate source bytes or repair files.
+    std::expected<Item, std::error_code> inspectItem(fs::FS&, std::string_view path);
     std::expected<Feeds, std::error_code> loadFeeds(fs::FS&, Recovery = Recovery::committedOnly);
     std::expected<Views, std::error_code> loadViews(fs::FS&, Recovery = Recovery::committedOnly);
 

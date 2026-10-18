@@ -10,5 +10,7 @@ hash_src = framework / "libraries/Hash/src"
 env.Append(CPPPATH=[str(hash_src), str(core)])
 project = Path(env.subst("$PROJECT_DIR"))
 env.Prepend(CPPPATH=[str(project / "test/test_library_organization/support"), str(project / "test/support")])
+if env.subst("$PIOENV") == "native_reading_status_test":
+    env.Prepend(CPPPATH=[str(project / "test/test_reading_status/support")])
 env.BuildSources("$BUILD_DIR/native_sha", str(hash_src), src_filter=["-<*>", "+<SHA2Builder.cpp>"])
 env.BuildSources("$BUILD_DIR/native_hex", str(core), src_filter=["-<*>", "+<HEXBuilder.cpp>"])
