@@ -9,7 +9,7 @@
 namespace {
 
     constexpr size_t kTextCount = static_cast<size_t>(UiText::Count);
-    static_assert(kTextCount == 187, "UiText count mismatch");
+    static_assert(kTextCount == 188, "UiText count mismatch");
 
     using TextRow = std::array<std::string_view, kTextCount>;
 
@@ -184,7 +184,7 @@ namespace {
         /* Gap                      */ "Gap",
         /* LibraryBooks             */ "Books",
         /* Newsletters              */ "Newsletters",
-        /* NeedsReview              */ "Needs review",
+        /* NeedsReview              */ "Review status",
         /* OtherArticles            */ "Other articles",
         /* Unread                   */ "Unread",
         /* LibraryBack              */ "Back",
@@ -201,6 +201,7 @@ namespace {
         /* LibraryItems             */ "items",
         /* OrganizationUnavailable  */ "Status unavailable",
         /* LibrarySaveFailed        */ "List position not saved",
+        /* LibraryPublisher         */ "Saved articles",
     }};
 
 } // namespace

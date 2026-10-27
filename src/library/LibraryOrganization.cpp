@@ -8,9 +8,11 @@
 #include <cerrno>
 #include <cstdio>
 #include <span>
+#include <type_traits>
 #include <utility>
 
 #include "hash/Fnv1a.h"
+#include "library/ArticleSource.h"
 #include "storage/fs/StorageFiles.h"
 #include "storage/fs/StoragePaths.h"
 #include "text/Utf8Text.h"
@@ -133,9 +135,11 @@ namespace LibraryOrganization {
         bool valid(const Views& r) {
             if (r.views.size() > kMaxViews
                 || !unique(r.views, [](const View& v) -> const std::string& { return v.collection; })) return false;
-            return std::ranges::all_of(r.views, [](const View& v) {
+            return std::ranges::all_of(r.views, [&](const View& v) {
                 const bool collection = v.collection == "books" || v.collection == "needs-review"
                     || v.collection == "other-articles"
+                    || (r.schema_version == kViewsSchemaVersion && v.collection.starts_with("source:")
+                        && ArticleSource::validPublisherHost(std::string_view{v.collection}.substr(7)))
                     || (v.collection.starts_with("feed:") && id(std::string_view{v.collection}.substr(5)));
                 return collection && tab(v.selected) && v.anchors.size() <= 3
                     && unique(v.anchors, [](const Anchor& a) { return a.tab; })
@@ -174,13 +178,18 @@ namespace LibraryOrganization {
             uint32_t schema_version = 0;
             struct glaze { static constexpr auto value = glz::object("schema_version", &Version::schema_version); };
         };
+        template<class T> bool supportedVersion(uint32_t version) {
+            if constexpr (std::is_same_v<T, Views>)
+                return version == kSchemaVersion || version == kViewsSchemaVersion;
+            return version == kSchemaVersion;
+        }
         template<class T> std::expected<T, std::error_code> decode(std::string_view input) {
             auto body = unwrap(input);
             if (!body) return std::unexpected(body.error());
             Version version;
             if (glz::read<glz::opts{.format = glz::TOML, .error_on_unknown_keys = false}>(version, *body))
                 return std::unexpected(make_error_code(Error::corrupt));
-            if (version.schema_version != kSchemaVersion)
+            if (!supportedVersion<T>(version.schema_version))
                 return std::unexpected(make_error_code(version.schema_version == 0 ? Error::corrupt : Error::unsupported_version));
             T record;
             if (auto error = glz::read<glz::opts{.format = glz::TOML, .error_on_unknown_keys = true}>(record, *body))
@@ -190,7 +199,7 @@ namespace LibraryOrganization {
             return record;
         }
         template<class T> std::expected<std::string, std::error_code> encodeRecord(const T& record) {
-            if (record.schema_version != kSchemaVersion) return std::unexpected(make_error_code(Error::unsupported_version));
+            if (!supportedVersion<T>(record.schema_version)) return std::unexpected(make_error_code(Error::unsupported_version));
             if (record.revision == 0 || !valid(record)) return std::unexpected(std::make_error_code(std::errc::invalid_argument));
             // Fixed-capacity heap storage prevents a large in-memory registry
             // from growing the serializer beyond the on-disk bound. Extra room
@@ -437,6 +446,10 @@ namespace LibraryOrganization {
         return save(fs, StoragePaths::kLibraryFeedsPath, std::move(r), revision, AnyRecord{});
     }
     std::expected<Views, std::error_code> saveViews(fs::FS& fs, Views r, uint64_t revision) {
+        if (!supportedVersion<Views>(r.schema_version)) return std::unexpected(make_error_code(Error::unsupported_version));
+        // Upgrade only on an explicit save. Loading v1 leaves its exact bytes
+        // intact, and the existing atomic writer retains it as rollback backup.
+        r.schema_version = kViewsSchemaVersion;
         return save(fs, StoragePaths::kLibraryViewPath, std::move(r), revision, AnyRecord{});
     }
 }

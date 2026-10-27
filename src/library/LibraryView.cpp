@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <limits>
 #include "library/ReadingStateStore.h"
+#include "library/ArticleSource.h"
 #include "storage/fs/StoragePaths.h"
+#include "text/RsvpDirectives.h"
 #include "text/UnicodeText.h"
 
 namespace LibraryView {
@@ -14,7 +16,9 @@ namespace LibraryView {
             if (collection == "books") return !row.article;
             if (collection == "newsletters") return row.article;
             if (collection == "needs-review") return row.availability != Availability::loading && row.status == Status::unknown;
-            if (collection == "other-articles") return row.article && row.memberships.empty();
+            if (collection == "other-articles") return row.article && row.memberships.empty() && row.publisherHost.empty();
+            if (collection.starts_with("source:")) return row.article && row.memberships.empty()
+                && row.publisherHost == collection.substr(7);
             if (!collection.starts_with("feed:")) return false;
             return row.article && std::ranges::any_of(row.memberships, [&](const auto& m) { return m.feed_id == collection.substr(5); });
         }
@@ -50,11 +54,29 @@ namespace LibraryView {
             return n;
         }
         size_t strings(const Row& r) {
-            size_t n = r.path.capacity() + r.title.capacity() + r.source.sha256.capacity() + r.chapter.capacity() + 4;
+            size_t n = r.path.capacity() + r.title.capacity() + r.source.sha256.capacity() + r.chapter.capacity() + r.publisherHost.capacity() + 5;
             n += r.memberships.capacity() * sizeof(LO::Membership);
             for (const auto& m : r.memberships) n += m.feed_id.capacity() + 1;
             return n;
         }
+    }
+    bool isNewsletterCollection(std::string_view collection) {
+        return collection.starts_with("feed:") || collection.starts_with("source:") || collection == "other-articles";
+    }
+    BookmarkInfo inspectBookmark(fs::FS& fs, std::string_view path,
+                                 const std::optional<reading::BookIdentity>& identity, bool ambiguous) {
+        if (identity && identity->wordCount > 0 && !ambiguous) {
+            auto state = ReadingStateStore::read(fs, path, *identity, true);
+            if (state) {
+                const auto index = state->reading.wordIndex;
+                return {index > 0 && index < identity->wordCount - 1 ? Status::reading : Status::unread, index, true};
+            }
+            return {state.error() == std::errc::no_such_file_or_directory ? Status::unread : Status::unknown};
+        }
+        // Without an index (or with a shared bookmark stem), only absence of
+        // a bookmark is enough to apply the owner's Unread default.
+        auto bookmark = ReadingStateStore::snapshot(fs, path);
+        return {bookmark && !*bookmark ? Status::unread : Status::unknown};
     }
     std::string displayTitle(std::string_view title, std::string_view path) {
         if (title.empty()) title = path.substr(path.find_last_of('/') + 1);
@@ -166,18 +188,27 @@ namespace LibraryView {
                     if (organization->restart) row.availability = Availability::recovery;
                     row.lastRead = organization->last_read_order; row.completed = organization->completed_order;
                     row.memberships = std::move(organization->memberships);
+                    if (row.article && row.memberships.empty())
+                        row.publisherHost = ArticleSource::publisherHost(organization->source_url);
                 }
-                // A shared legacy stem cannot tell which file owns its bookmark.
-                if (identity && identity->wordCount > 0 && !ambiguous[i]) {
-                    auto state = ReadingStateStore::read(fs, row.path, *identity);
-                    if (state) {
-                        row.progressKnown = true; wordIndex = state->reading.wordIndex;
-                        row.progress = identity->wordCount <= 1 ? 0 : static_cast<uint8_t>(static_cast<uint64_t>(state->reading.wordIndex) * 100 / (identity->wordCount - 1));
-                        if (!organization && organization.error() == std::errc::no_such_file_or_directory
-                            && state->reading.wordIndex > 0 && state->reading.wordIndex < identity->wordCount - 1) row.status = Status::reading;
+                const bool missingOrganization = !organization && organization.error() == std::errc::no_such_file_or_directory;
+                const bool legacy = missingOrganization || (organization && LO::isLegacyUnclassified(*organization));
+                if (missingOrganization) row.availability = Availability::ready;
+                // The owner defaults older items to Unread. A validated middle
+                // bookmark still proves Reading; damaged or ambiguous bookmarks
+                // remain reviewable. Browsing never rewrites a bookmark/record.
+                if (legacy || (identity && identity->wordCount > 0 && !ambiguous[i])) {
+                    const auto bookmark = inspectBookmark(fs, row.path, identity, ambiguous[i]);
+                    if (legacy) row.status = bookmark.legacyStatus;
+                    if (bookmark.known) {
+                        row.progressKnown = true; wordIndex = bookmark.wordIndex;
+                        row.progress = identity->wordCount <= 1 ? 0 : static_cast<uint8_t>(static_cast<uint64_t>(wordIndex) * 100 / (identity->wordCount - 1));
                     }
                 }
-                if (!organization && organization.error() == std::errc::no_such_file_or_directory) row.availability = Availability::ready;
+                // Older downloader files already identify their publisher. Recover
+                // that label offline without inventing a feed or changing status.
+                if (row.article && row.memberships.empty() && row.publisherHost.empty())
+                    row.publisherHost = ArticleSource::publisherHost(RsvpText::readRsvpDirectiveValues(fs, row.path).source);
             }
             if (const auto* chapter = bookMetadata.chapterAt(wordIndex)) row.chapter = std::string{Utf8Text::prefix(chapter->title, LO::kMaxLabelBytes)};
             bytes += strings(row);
@@ -218,6 +249,7 @@ namespace LibraryView {
     }
     bool Model::exists(std::string_view id) const {
         if (id == "books" || id == "other-articles" || id == "needs-review") return true;
+        if (id.starts_with("source:")) return std::ranges::any_of(rows_, [&](const auto& row) { return belongs(row, id); });
         if (!id.starts_with("feed:")) return false;
         for (const auto& feed : feeds_.feeds) if (feed.id == id.substr(5) && feed.active) return true;
         for (const auto& row : rows_) for (const auto& m : row.memberships) if (m.feed_id == id.substr(5)) return true;
@@ -296,6 +328,13 @@ namespace LibraryView {
         };
         for (const auto& f : feeds.feeds) if (!addId(f.id)) return std::unexpected(std::make_error_code(std::errc::value_too_large));
         for (const auto& r : next) for (const auto& m : r.memberships) if (!addId(m.feed_id)) return std::unexpected(std::make_error_code(std::errc::value_too_large));
+        std::vector<std::string_view> publishers;
+        for (const auto& r : next) if (r.article && r.memberships.empty() && !r.publisherHost.empty()) {
+            if (!ArticleSource::validPublisherHost(r.publisherHost)) return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+            if (std::ranges::find(publishers, r.publisherHost) != publishers.end()) continue;
+            if (ids.size() + publishers.size() == LO::kMaxFeeds) return std::unexpected(std::make_error_code(std::errc::value_too_large));
+            publishers.push_back(r.publisherHost);
+        }
         // Reject duplicate canonical paths: counts and membership aggregates are unique.
         std::vector<size_t> paths(next.size());
         for (size_t i = 0; i < paths.size(); ++i) paths[i] = i;
@@ -334,6 +373,14 @@ namespace LibraryView {
         for (const auto& r : rows_) for (const auto& m : r.memberships) {
             const auto id = "feed:" + m.feed_id;
             if (std::ranges::none_of(result, [&](const auto& c) { return c.id == id; })) result.push_back({id, m.feed_id, false, count(rows_, id)});
+        }
+        std::vector<std::string_view> publishers;
+        for (const auto& r : rows_) if (r.article && r.memberships.empty() && !r.publisherHost.empty()
+            && std::ranges::find(publishers, r.publisherHost) == publishers.end()) publishers.push_back(r.publisherHost);
+        std::sort(publishers.begin(), publishers.end());
+        for (const auto host : publishers) {
+            const auto id = "source:" + std::string(host);
+            result.push_back({id, std::string(host), true, count(rows_, id)});
         }
         const auto other = count(rows_, "other-articles");
         if (other.unread + other.reading + other.read + other.unknown + other.loading) result.push_back({"other-articles", "Other articles", true, other});

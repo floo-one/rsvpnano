@@ -18,6 +18,7 @@ namespace LibraryView {
     enum class Availability { loading, ready, missing, corrupt, unsupported, stale, ioError, recovery };
     struct Row {
         std::string path, title, chapter;
+        std::string publisherHost; // Display-only fallback; never a feed membership.
         LibraryOrganization::SourceIdentity source;
         size_t sourceIndex = 0;
         Status status = Status::unknown;
@@ -36,6 +37,16 @@ namespace LibraryView {
     };
     size_t memoryBytes(std::span<const Row> rows, size_t capacity);
     std::string displayTitle(std::string_view title, std::string_view path);
+    bool isNewsletterCollection(std::string_view collection);
+    struct BookmarkInfo {
+        Status legacyStatus = Status::unknown;
+        uint32_t wordIndex = 0;
+        bool known = false;
+    };
+    // Shared by library preparation and Item actions before the library has
+    // been visited. Requires SD ownership; never mutates a bookmark.
+    BookmarkInfo inspectBookmark(fs::FS&, std::string_view path,
+                                 const std::optional<reading::BookIdentity>&, bool ambiguous = false);
     Counts count(std::span<const Row>, std::string_view collection = {});
     std::vector<size_t> project(std::span<const Row>, std::string_view collection, Tab);
     // Returns an inventory index, never the position in a filtered list.

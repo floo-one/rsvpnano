@@ -17,6 +17,7 @@ namespace fs { class FS; }
 // paint/touch callbacks. The caller serializes operations and verifies source bytes.
 namespace LibraryOrganization {
     constexpr uint32_t kSchemaVersion = 1;
+    constexpr uint32_t kViewsSchemaVersion = 2;
     constexpr size_t kMaxRecordBytes = 64 * 1024;
     constexpr size_t kMaxPathBytes = 4096;
     constexpr size_t kMaxLabelBytes = 256;
@@ -89,6 +90,9 @@ namespace LibraryOrganization {
         std::string match_scope; // Feed ID for linkless or incomplete bodies.
         bool operator==(const Item&) const = default;
     };
+    inline bool isLegacyUnclassified(const Item& item) {
+        return item.status == Status::unknown && item.unknown_reason == "legacy-unclassified" && !item.restart;
+    }
     struct Feed {
         std::string id;
         std::string url;
@@ -139,7 +143,9 @@ namespace LibraryOrganization {
         bool operator==(const View&) const = default;
     };
     struct Views {
-        uint32_t schema_version = kSchemaVersion;
+        // Version 2 adds publisher collections. Old firmware must treat these
+        // as unsupported, not as damaged version-1 records to recover/replace.
+        uint32_t schema_version = kViewsSchemaVersion;
         uint64_t revision = 0;
         std::vector<View> views;
         bool operator==(const Views&) const = default;

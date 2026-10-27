@@ -198,7 +198,8 @@ namespace screens {
             } else {
                 const auto& c = collections_[feedChoices_[i]];
                 title = collectionTitle(ui, c);
-                detail = ui.text(c.active ? UiText::LibraryItems : UiText::SavedNewsletter);
+                detail = ui.text(c.id.starts_with("source:") ? UiText::LibraryPublisher
+                                                             : c.active ? UiText::LibraryItems : UiText::SavedNewsletter);
                 value = std::to_string(total(c.counts));
             }
             auto& p = paints[used++];

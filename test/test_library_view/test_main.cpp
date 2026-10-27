@@ -5,6 +5,7 @@
 #include "library/ReadingStateStore.h"
 #include "storage/fs/StoragePaths.h"
 #include <algorithm>
+#include "article_source_tests.h"
 using namespace LibraryView;
 namespace LO = LibraryOrganization;
 namespace Board::Storage { fs::FS& filesystem() { static fs::FS instance; return instance; } }
@@ -141,16 +142,127 @@ std::vector<BookLibrary::Entry> books(fs::FS& fs, size_t count) {
     return result;
 }
 auto metadata(size_t, Row&, BookMetadata&) { return std::optional{identity}; }
-void legacy_status_is_conservative_and_bookmarks_untouched() {
+void legacy_status_defaults_to_unread_and_bookmarks_are_untouched() {
     fs::FS fs; auto entries = books(fs,5);
     for (size_t i=0; i<4; ++i) TEST_ASSERT_TRUE(ReadingStateStore::write(fs,entries[i].path,{identity,{.wordIndex=static_cast<uint32_t>(i == 3 ? 4 : i)}}).has_value());
     const auto writes = fs.disk->mutations.size();
     auto rows = prepare(fs,entries,metadata); TEST_ASSERT_TRUE(rows.has_value());
-    TEST_ASSERT_TRUE((*rows)[0].status == Status::unknown); TEST_ASSERT_TRUE((*rows)[1].status == Status::reading);
-    TEST_ASSERT_TRUE((*rows)[2].status == Status::reading); TEST_ASSERT_TRUE((*rows)[3].status == Status::unknown);
-    TEST_ASSERT_TRUE((*rows)[4].status == Status::unknown); TEST_ASSERT_EQUAL(writes, fs.disk->mutations.size());
+    TEST_ASSERT_TRUE((*rows)[0].status == Status::unread); TEST_ASSERT_TRUE((*rows)[1].status == Status::reading);
+    TEST_ASSERT_TRUE((*rows)[2].status == Status::reading); TEST_ASSERT_TRUE((*rows)[3].status == Status::unread);
+    TEST_ASSERT_TRUE((*rows)[4].status == Status::unread); TEST_ASSERT_EQUAL(writes, fs.disk->mutations.size());
     auto one = prepare(fs,entries,[](size_t,Row&,BookMetadata&) {return std::optional{reading::BookIdentity{3,42,1}};});
-    for (const auto& r : *one) TEST_ASSERT_TRUE(r.status == Status::unknown);
+    for (size_t i = 0; i < 4; ++i) TEST_ASSERT_TRUE((*one)[i].status == Status::unknown); // Stale bookmarks.
+    TEST_ASSERT_TRUE(one->back().status == Status::unread);
+    // A valid one-word bookmark carries no completion history: default Unread.
+    TEST_ASSERT_TRUE(ReadingStateStore::write(fs, entries[4].path, {{3,42,1},{}}).has_value());
+    one = prepare(fs,entries,[](size_t,Row&,BookMetadata&) {return std::optional{reading::BookIdentity{3,42,1}};});
+    TEST_ASSERT_TRUE(one->back().status == Status::unread);
+}
+void legacy_items_remain_browsable_in_their_collections() {
+    fs::FS fs;
+    auto entries = books(fs, 6);
+    for (size_t i = 0; i < 24; ++i) {
+        const auto path = "/library/articles/issue" + std::to_string(i) + ".rsvp";
+        fs.put(path, "@title Issue\n@source https://" + std::string(i < 20 ? "first.example" : "second.example") + "/post\n\nBody");
+        entries.push_back({path, fs.bytes(path).size(), "Issue " + std::to_string(i)});
+    }
+    for (const auto i : {0, 6}) TEST_ASSERT_TRUE(ReadingStateStore::write(fs, entries[i].path, {identity, {.wordIndex=2}}).has_value());
+    const auto writes = fs.disk->mutations.size();
+    auto prepared = prepare(fs, entries, metadata); TEST_ASSERT_TRUE(prepared.has_value());
+    TEST_ASSERT_EQUAL(28, count(*prepared).unread); TEST_ASSERT_EQUAL(2, count(*prepared).reading);
+    TEST_ASSERT_EQUAL(0, count(*prepared, "needs-review").unknown);
+    TEST_ASSERT_EQUAL(5, count(*prepared, "books").unread);
+    TEST_ASSERT_EQUAL(19, count(*prepared, "source:first.example").unread);
+    TEST_ASSERT_EQUAL(4, count(*prepared, "source:second.example").unread);
+    TEST_ASSERT_EQUAL(0, count(*prepared, "other-articles").unread);
+    Model m; TEST_ASSERT_TRUE(m.replace(*prepared, {}, 1).has_value());
+    TEST_ASSERT_EQUAL(3, m.collections().size());
+    TEST_ASSERT_TRUE(m.open("source:first.example")); TEST_ASSERT_TRUE(m.tab() == Tab::unread);
+    TEST_ASSERT_EQUAL(19, m.order().size());
+    TEST_ASSERT_TRUE(m.open("books")); TEST_ASSERT_TRUE(m.tab() == Tab::reading);
+    m.selectTab(Tab::unread); TEST_ASSERT_EQUAL(5, m.order().size());
+    TEST_ASSERT_EQUAL(writes, fs.disk->mutations.size());
+    // The default and recovered grouping are deterministic after restart.
+    auto again = prepare(fs, entries, metadata); TEST_ASSERT_TRUE(again.has_value());
+    TEST_ASSERT_EQUAL(28, count(*again).unread);
+    TEST_ASSERT_EQUAL(19, count(*again, "source:first.example").unread);
+}
+void legacy_defaults_preserve_errors_explicit_choices_and_feed_associations() {
+    fs::FS fs; auto entries = books(fs, 6);
+    LO::Item old; old.path=entries[0].path; old.source=*LO::hashSource(fs,old.path);
+    old.status=Status::unknown; old.unknown_reason="legacy-unclassified";
+    TEST_ASSERT_TRUE(LO::saveItem(fs,old,0).has_value());
+    old.path=entries[1].path; TEST_ASSERT_TRUE(LO::saveItem(fs,old,0).has_value());
+    TEST_ASSERT_TRUE(ReadingStateStore::write(fs,old.path,{identity,{.wordIndex=2}}).has_value());
+    old.path=entries[2].path; old.unknown_reason="needs-manual-review"; TEST_ASSERT_TRUE(LO::saveItem(fs,old,0).has_value());
+    fs.put(StoragePaths::bookStatePathFor(entries[3].path),"broken");
+    TEST_ASSERT_TRUE(ReadingStateStore::write(fs,entries[4].path,{{999,7,5},{.wordIndex=2}}).has_value());
+    const auto writes=fs.disk->mutations.size();
+    auto prepared=prepare(fs,entries,metadata); TEST_ASSERT_TRUE(prepared.has_value());
+    TEST_ASSERT_TRUE((*prepared)[0].status==Status::unread);
+    TEST_ASSERT_TRUE((*prepared)[1].status==Status::reading);
+    for (size_t i=2;i<5;++i) TEST_ASSERT_TRUE((*prepared)[i].status==Status::unknown);
+    TEST_ASSERT_TRUE((*prepared)[5].status==Status::unread);
+    TEST_ASSERT_EQUAL(writes,fs.disk->mutations.size());
+    auto unindexed=prepare(fs,entries,{}); TEST_ASSERT_TRUE(unindexed.has_value());
+    TEST_ASSERT_TRUE((*unindexed)[0].status==Status::unread);
+    TEST_ASSERT_TRUE((*unindexed)[1].status==Status::unknown); // Bookmark cannot be validated without index.
+    auto damaged=*ReadingStateStore::encode({identity,{.wordIndex=2}});
+    const auto index=damaged.find("wordIndex = 2"); TEST_ASSERT_NOT_EQUAL(std::string::npos,index);
+    damaged.replace(index,13,"wordIndex = 9999");
+    fs.put(StoragePaths::bookStatePathFor(entries[5].path),damaged);
+    auto invalidPosition=prepare(fs,entries,metadata); TEST_ASSERT_TRUE(invalidPosition.has_value());
+    TEST_ASSERT_TRUE(invalidPosition->back().status==Status::unknown);
+    TEST_ASSERT_FALSE(invalidPosition->back().progressKnown);
+    TEST_ASSERT_EQUAL_STRING(damaged.c_str(),fs.bytes(StoragePaths::bookStatePathFor(entries[5].path)).c_str());
+}
+void publisher_groups_are_only_a_fallback_and_restore_navigation() {
+    fs::FS fs; std::vector<BookLibrary::Entry> entries;
+    for (size_t i=0;i<5;++i) {
+        const auto path=std::string(i==4?"/library/books/":"/library/articles/")+std::to_string(i)+".rsvp";
+        fs.put(path,"@title Item\n@source https://NEWS.example/post\n\nBody");
+        entries.push_back({path,fs.bytes(path).size(),"Item "+std::to_string(i)});
+    }
+    fs.put(entries[2].path,"@source https://bad.example:123/post\n\nBody");
+    fs.put(entries[3].path,"@title Item\n\n@source https://body.example/post\n");
+    LO::Item explicitItem; explicitItem.path=entries[0].path; explicitItem.source=*LO::hashSource(fs,explicitItem.path);
+    explicitItem.status=Status::read; explicitItem.memberships={{"confirmed",1,0}};
+    TEST_ASSERT_TRUE(LO::saveItem(fs,explicitItem,0).has_value());
+    auto prepared=prepare(fs,entries,metadata); TEST_ASSERT_TRUE(prepared.has_value());
+    TEST_ASSERT_TRUE((*prepared)[0].publisherHost.empty());
+    TEST_ASSERT_EQUAL(1, count(*prepared,"feed:confirmed").read);
+    TEST_ASSERT_EQUAL(1, count(*prepared,"source:news.example").unread);
+    TEST_ASSERT_EQUAL(2, count(*prepared,"other-articles").unread);
+    TEST_ASSERT_EQUAL(1, count(*prepared,"books").unread);
+    Model m; m.load(fs); TEST_ASSERT_TRUE(m.replace(*prepared,{},1).has_value());
+    TEST_ASSERT_TRUE(m.open("source:news.example"));
+    TEST_ASSERT_TRUE(m.select(0)->path==entries[1].path);
+    m.selectTab(Tab::read); TEST_ASSERT_TRUE(m.save(fs).has_value());
+    Model restarted; TEST_ASSERT_TRUE(restarted.load(fs).has_value()); TEST_ASSERT_TRUE(restarted.replace(*prepared,{},2).has_value());
+    TEST_ASSERT_TRUE(restarted.open("source:news.example")); TEST_ASSERT_TRUE(restarted.tab()==Tab::read);
+    // Removing a publisher evicts only its view; an active subscription is not needed.
+    prepared->erase(prepared->begin()+1);
+    TEST_ASSERT_TRUE(restarted.replace(*prepared,{},3).has_value());
+    TEST_ASSERT_FALSE(restarted.open("source:news.example"));
+    TEST_ASSERT_TRUE(restarted.saved().views.empty());
+    LO::Views bad; bad.views={{"source:Bad.example",Tab::unread,{}}}; TEST_ASSERT_FALSE(LO::encode(bad).has_value());
+}
+void publisher_and_feed_collection_budget_is_shared() {
+    std::vector<Row> rows;
+    for (size_t i=0;i<LO::kMaxFeeds;++i) {
+        auto r=row("Issue "+std::to_string(i),Status::unread,i,true);
+        r.publisherHost="publisher"+std::to_string(i)+".example";
+        rows.push_back(std::move(r));
+    }
+    Model model; TEST_ASSERT_TRUE(model.replace(rows,{},1).has_value());
+    TEST_ASSERT_EQUAL(LO::kMaxFeeds+1,model.collections().size());
+    LO::Feeds feeds; feeds.feeds={{.id="configured",.active=true}};
+    TEST_ASSERT_FALSE(model.replace(rows,feeds,2).has_value());
+    TEST_ASSERT_EQUAL(1,model.generation()); // Overflow keeps the valid snapshot.
+    rows.back().publisherHost=rows.front().publisherHost;
+    TEST_ASSERT_TRUE(model.replace(rows,feeds,2).has_value());
+    rows.front().publisherHost="bad.example:443";
+    TEST_ASSERT_FALSE(model.replace(rows,feeds,3).has_value());
 }
 void explicit_status_identity_and_unavailable_metadata() {
     fs::FS fs; auto entries = books(fs,4);
@@ -226,7 +338,7 @@ void shared_screen_prepares_off_frame_and_invalidates_same_count() {
     for (int i=0;i<20;++i) TEST_ASSERT_EQUAL(4,screen.items(storage,store,session).size());
     TEST_ASSERT_EQUAL(0,io); TEST_ASSERT_EQUAL(4,storage.metadataReads);
     TEST_ASSERT_FALSE(screen.selection().has_value());
-    TEST_ASSERT_TRUE(screen.openCollection("needs-review", storage));
+    TEST_ASSERT_TRUE(screen.openCollection("books", storage));
     ui::Touch start{.actions=ui::TouchStart}; screen.observeTouch(&start);
     auto selected=screen.selection(); TEST_ASSERT_TRUE(selected.has_value());
     storage.inventory[0].path="/library/books/replaced.txt"; ++storage.revision;
@@ -238,9 +350,10 @@ void shared_screen_prepares_off_frame_and_invalidates_same_count() {
     ui::Touch release{.actions=ui::TouchRelease|ui::TouchTap}; screen.observeTouch(&release);
     TEST_ASSERT_FALSE(screen.selection().has_value()); // release from the old gesture cannot open a neighbor
     TEST_ASSERT_TRUE(screen.openCollection("needs-review",storage));
-    screen.observeTouch(&start); TEST_ASSERT_TRUE(screen.selection().has_value());
+    screen.observeTouch(&start); TEST_ASSERT_FALSE(screen.selection().has_value());
     TEST_ASSERT_TRUE(screen.openCollection("books", storage));
-    TEST_ASSERT_TRUE(screen.view().order().empty());
+    screen.observeTouch(&start); TEST_ASSERT_TRUE(screen.selection().has_value());
+    TEST_ASSERT_EQUAL(4, screen.view().order().size());
 }
 void persisted_views_survive_each_interrupted_update() {
     const auto seed = [](fs::FS& fs, Model& model) {
@@ -296,12 +409,17 @@ void browsing_context_growth_is_bounded() {
 }
 int main() {
     UNITY_BEGIN();
+    ArticleSourceTests::run();
+    RUN_TEST(legacy_defaults_preserve_errors_explicit_choices_and_feed_associations);
+    RUN_TEST(publisher_groups_are_only_a_fallback_and_restore_navigation);
+    RUN_TEST(publisher_and_feed_collection_budget_is_shared);
     RUN_TEST(browsing_context_growth_is_bounded);
     RUN_TEST(persisted_views_survive_each_interrupted_update);
     RUN_TEST(shared_article_preparation_carries_one_progress_and_status);
     RUN_TEST(titles_and_resource_errors_are_bounded_without_truncating_items);
     RUN_TEST(shared_screen_prepares_off_frame_and_invalidates_same_count);
     RUN_TEST(defaults_and_empty_saved_tabs);
+    RUN_TEST(legacy_items_remain_browsable_in_their_collections);
     RUN_TEST(filters_counts_and_shared_memberships);
     RUN_TEST(title_activity_and_arrival_sorting);
     RUN_TEST(collection_order_archives_and_orphans);
@@ -309,7 +427,7 @@ int main() {
     RUN_TEST(independent_tabs_collections_and_restart);
     RUN_TEST(same_count_generation_and_canonical_mapping);
     RUN_TEST(partial_rows_and_clamping);
-    RUN_TEST(legacy_status_is_conservative_and_bookmarks_untouched);
+    RUN_TEST(legacy_status_defaults_to_unread_and_bookmarks_are_untouched);
     RUN_TEST(explicit_status_identity_and_unavailable_metadata);
     RUN_TEST(ambiguous_legacy_stems_and_missing_sources);
     RUN_TEST(preparation_priority_cancel_budget_and_zero_fs_projection);

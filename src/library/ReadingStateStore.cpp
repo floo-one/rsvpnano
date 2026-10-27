@@ -15,6 +15,8 @@ namespace ReadingStateStore {
             : glz::read<glz::opts{.format=glz::TOML, .error_on_unknown_keys=false}>(state, bytes);
         if (error) return std::unexpected(std::make_error_code(std::errc::invalid_argument));
         if (state.identity != identity) return std::unexpected(std::make_error_code(std::errc::state_not_recoverable));
+        if (strict && state.reading.wordIndex >= identity.wordCount)
+            return std::unexpected(std::make_error_code(std::errc::invalid_argument));
         state.reading.wordIndex = std::min(state.reading.wordIndex, identity.wordCount - 1);
         return state;
     }
@@ -42,11 +44,11 @@ namespace ReadingStateStore {
         }
         return std::move(*bytes);
     }
-    std::expected<reading::StoredState, std::error_code> read(fs::FS& fs, std::string_view path, const reading::BookIdentity& identity) {
+    std::expected<reading::StoredState, std::error_code> read(fs::FS& fs, std::string_view path, const reading::BookIdentity& identity, bool strict) {
         auto bytes = snapshot(fs, path);
         if (!bytes) return std::unexpected(bytes.error());
         if (!*bytes) return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
-        return decode(**bytes, identity);
+        return decode(**bytes, identity, strict);
     }
     std::expected<void, std::error_code> write(fs::FS& fs, std::string_view path, const reading::StoredState& state) {
         auto bytes = encode(state);

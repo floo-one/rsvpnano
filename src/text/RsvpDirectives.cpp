@@ -1,12 +1,14 @@
 #include "text/RsvpDirectives.h"
 
 #include <algorithm>
+#include <array>
 
 #include "board/BoardStorage.h"
 
 #include "storage/fs/StoragePaths.h"
 #include "text/AsciiText.h"
 #include "text/TextNormalizer.h"
+#include "text/Utf8Text.h"
 
 namespace RsvpText {
 
@@ -71,13 +73,17 @@ namespace RsvpText {
     }
 
     RsvpDirectiveValues readRsvpDirectiveValues(std::string_view path) {
+        return readRsvpDirectiveValues(Board::Storage::filesystem(), path);
+    }
+
+    RsvpDirectiveValues readRsvpDirectiveValues(fs::FS& fs, std::string_view path) {
         RsvpDirectiveValues values;
         const std::string ownedPath{path};
         if (!hasRsvpExtension(path)) {
             return values;
         }
 
-        File file = Board::Storage::filesystem().open(ownedPath.c_str());
+        File file = fs.open(ownedPath.c_str());
         if (!file || file.isDirectory()) {
             if (file) {
                 file.close();
@@ -85,42 +91,73 @@ namespace RsvpText {
             return values;
         }
 
+        // Match the writer's field limits, independently of chapter-heading
+        // detection. A long source/converter line must not hide a later author.
+        constexpr size_t maxDisplayBytes = 256, maxSourceBytes = 512;
+        constexpr size_t maxLineBytes = maxSourceBytes + 16;
+        constexpr size_t maxHeaderBytes = 4096, maxHeaderLines = 64;
         std::string line;
-        line.reserve(kMaxChapterTitleChars + 16);
-        while (file.available()) {
-            const char c = static_cast<char>(file.read());
-            if (c == '\r') {
-                continue;
-            }
-
-            if (c != '\n') {
-                line += c;
-                if (line.length() > kMaxChapterTitleChars + 16) {
-                    line.clear();
-                    break;
-                }
-                continue;
-            }
-
+        line.reserve(maxLineBytes);
+        bool overflow = false, sawDirective = false, sourceConflict = false;
+        size_t lines = 0;
+        const auto consumeLine = [&] {
+            if (++lines > maxHeaderLines) return false;
             const std::string_view trimmed = stripBom(line);
-            if (trimmed.empty()) {
-                line.clear();
-                continue;
+            if (trimmed.empty()) return !sawDirective;
+            // The first body line, including an escaped @ or chapter marker,
+            // ends the header. Never discover metadata in the reading content.
+            if (!trimmed.starts_with('@') || trimmed.starts_with("@@")
+                || prefixHasBoundary(trimmed, "@chapter") || prefixHasBoundary(trimmed, "@para")) return false;
+            sawDirective = true;
+            if (!overflow) {
+                if (values.title.empty() && prefixHasBoundary(trimmed, "@title")) {
+                    values.title = directiveValue(trimmed, "@title");
+                    values.title.resize(Utf8Text::prefix(values.title, maxDisplayBytes).size());
+                } else if (values.author.empty() && prefixHasBoundary(trimmed, "@author")) {
+                    values.author = directiveValue(trimmed, "@author");
+                    values.author.resize(Utf8Text::prefix(values.author, maxDisplayBytes).size());
+                } else if (!sourceConflict && prefixHasBoundary(trimmed, "@source")) {
+                    auto source = AsciiText::trim(trimmed.substr(7));
+                    if (!source.empty() && (source.front() == ':' || source.front() == '-' || source.front() == '.')) {
+                        source.remove_prefix(1);
+                        source = AsciiText::trim(source);
+                    }
+                    if (source.size() > maxSourceBytes || source.find_first_of("\r\n\t\0", 0, 4) != std::string_view::npos
+                        || (!values.source.empty() && values.source != source)) {
+                        values.source.clear();
+                        sourceConflict = true;
+                    } else {
+                        values.source = source;
+                    }
+                }
+            } else if (prefixHasBoundary(trimmed, "@source")) {
+                values.source.clear();
+                sourceConflict = true;
             }
-
-            if (values.title.empty() && prefixHasBoundary(trimmed, "@title")) {
-                values.title = directiveValue(trimmed, "@title");
-            } else if (values.author.empty() && prefixHasBoundary(trimmed, "@author")) {
-                values.author = directiveValue(trimmed, "@author");
-            } else if (!trimmed.starts_with('@')) {
-                break;
+            return true;
+        };
+        std::array<uint8_t, 128> buffer{};
+        size_t bytes = 0;
+        bool header = true;
+        while (header && bytes < maxHeaderBytes && lines < maxHeaderLines) {
+            const size_t length = file.read(buffer.data(), std::min(buffer.size(), maxHeaderBytes - bytes));
+            if (!length) break;
+            bytes += length;
+            for (size_t i = 0; i < length && header; ++i) {
+                const char c = static_cast<char>(buffer[i]);
+                if (c == '\n') {
+                    header = consumeLine() && lines < maxHeaderLines;
+                    line.clear();
+                    overflow = false;
+                } else {
+                    if (line.size() < maxLineBytes) line += c;
+                    else overflow = true;
+                }
             }
-
-            if (!values.title.empty() && !values.author.empty()) {
-                break;
-            }
-            line.clear();
         }
+        // Include a complete final line even when it ends exactly at the byte
+        // limit. A failed read or exhausted budget cannot publish a partial URL.
+        if (header && lines < maxHeaderLines && !line.empty() && file.position() == file.size()) consumeLine();
 
         file.close();
         return values;

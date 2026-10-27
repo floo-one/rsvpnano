@@ -11,7 +11,7 @@ namespace screens {
         for (size_t i = 0; i < collections_.size(); ++i) {
             if (collections_[i].id == "needs-review")
                 hasReview_ = true;
-            if (collections_[i].id.starts_with("feed:") || collections_[i].id == "other-articles")
+            if (LibraryView::isNewsletterCollection(collections_[i].id))
                 feedChoices_.push_back(i);
         }
         if (page_ == Page::collection && view_.collection().empty())
@@ -38,8 +38,7 @@ namespace screens {
         if (page_ == Page::feeds)
             page_ = Page::root;
         else
-            page_ = view_.collection().starts_with("feed:") || view_.collection() == "other-articles" ? Page::feeds
-                                                                                                      : Page::root;
+            page_ = LibraryView::isNewsletterCollection(view_.collection()) ? Page::feeds : Page::root;
         reset();
         return true;
     }
@@ -81,7 +80,7 @@ namespace screens {
         if (browse(readerCollection_))
             changeTab(readerTab_);
         else {
-            page_ = readerCollection_.starts_with("feed:") ? Page::feeds : Page::root;
+            page_ = LibraryView::isNewsletterCollection(readerCollection_) ? Page::feeds : Page::root;
             reset();
         }
     }

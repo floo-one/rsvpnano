@@ -87,6 +87,109 @@ auto snapshot(const fs::FS& fs) {
     for (const auto& [path, node] : fs.disk->nodes) result[path] = {node->bytes, node->directory};
     return result;
 }
+Views legacyViews() {
+    Views views;
+    views.schema_version = 1;
+    views.revision = 3;
+    views.views = {{"books", Tab::reading, {{Tab::reading, item().path, 13}}},
+                   {"feed:one", Tab::unread, {{Tab::unread, "/library/articles/one.txt", 51}}}};
+    return views;
+}
+void publisher_views_require_version_two_without_changing_other_records() {
+    Views views; views.revision = 1;
+    views.views = {{"source:writer.example.com", Tab::reading,
+                    {{Tab::reading, "/library/articles/one.rsvp", 12}}}};
+    TEST_ASSERT_EQUAL_UINT32(2, views.schema_version);
+    const auto bytes = encode(views);
+    TEST_ASSERT_TRUE(bytes.has_value());
+    TEST_ASSERT_TRUE(bytes->starts_with("# rsvpnano-library v1 "));
+    TEST_ASSERT_TRUE(decodeViews(*bytes) == views);
+    // These record types retain the same v1-only version gate that shipped in
+    // the earlier firmware: reject schema 2 before interpreting its fields.
+    errorIs(decodeItem(*bytes), Error::unsupported_version);
+    errorIs(decodeFeeds(*bytes), Error::unsupported_version);
+    errorIs(decodeImport(*bytes), Error::unsupported_version);
+    errorIs(decodeViews(editRecord(*bytes, "schema_version = 2", "schema_version = 1")), Error::corrupt);
+    views.schema_version = 1;
+    errorIs(encode(views), std::make_error_code(std::errc::invalid_argument));
+    TEST_ASSERT_EQUAL_UINT32(1, Item{}.schema_version);
+    TEST_ASSERT_EQUAL_UINT32(1, Feeds{}.schema_version);
+    TEST_ASSERT_EQUAL_UINT32(1, Import{}.schema_version);
+}
+void legacy_views_load_unchanged_and_upgrade_only_on_save() {
+    fs::FS fs;
+    const auto old = legacyViews();
+    const auto bytes = encode(old);
+    TEST_ASSERT_TRUE(bytes.has_value());
+    fs.put(StoragePaths::kLibraryViewPath, *bytes);
+    const auto before = snapshot(fs);
+    auto loaded = loadViews(fs);
+    TEST_ASSERT_TRUE(loaded == old);
+    TEST_ASSERT_TRUE(before == snapshot(fs));
+    TEST_ASSERT_TRUE(fs.disk->mutations.empty());
+    // A model loaded from v1 can add publisher views before it next saves.
+    loaded->views.push_back({"source:writer.example.com", Tab::unread, {}});
+    auto saved = saveViews(fs, *loaded, loaded->revision);
+    TEST_ASSERT_TRUE(saved.has_value());
+    TEST_ASSERT_EQUAL_UINT32(2, saved->schema_version);
+    TEST_ASSERT_EQUAL_UINT64(4, saved->revision);
+    TEST_ASSERT_TRUE(saved->views == loaded->views);
+    TEST_ASSERT_TRUE(loadViews(fs) == *saved);
+    TEST_ASSERT_EQUAL_STRING(bytes->c_str(), fs.bytes(std::string(StoragePaths::kLibraryViewPath) + ".bak").c_str());
+}
+void future_view_versions_are_never_downgraded_or_recovered_over() {
+    fs::FS fs;
+    const auto old = legacyViews();
+    Views current; current.revision = 4; current.views = old.views;
+    const auto currentBytes = encode(current);
+    TEST_ASSERT_TRUE(currentBytes.has_value());
+    const auto future = editRecord(*currentBytes, "schema_version = 2", "schema_version = 3");
+    fs.put(StoragePaths::kLibraryViewPath, future);
+    fs.put(std::string(StoragePaths::kLibraryViewPath) + ".bak", *encode(old));
+    const auto before = snapshot(fs);
+    errorIs(loadViews(fs), Error::unsupported_version);
+    errorIs(saveViews(fs, current, current.revision), Error::unsupported_version);
+    TEST_ASSERT_TRUE(before == snapshot(fs));
+    current.schema_version = 3;
+    errorIs(encode(current), Error::unsupported_version);
+    fs::FS empty;
+    errorIs(saveViews(empty, current, 0), Error::unsupported_version);
+    TEST_ASSERT_TRUE(empty.disk->nodes.empty());
+}
+void view_version_upgrade_survives_each_power_loss_boundary() {
+    size_t boundaries = 0;
+    for (size_t crash = 0; crash <= boundaries || crash == 0; ++crash) {
+        fs::FS fs;
+        const auto old = legacyViews();
+        fs.put(StoragePaths::kLibraryViewPath, *encode(old));
+        fs.put(item().path, "original content");
+        const auto bookmark = StoragePaths::bookStatePathFor(item().path);
+        fs.put(bookmark, "original bookmark");
+        auto next = old;
+        next.views.push_back({"source:writer.example.com", Tab::read,
+                              {{Tab::read, "/library/articles/one.rsvp", 17}}});
+        auto expected = next;
+        expected.schema_version = 2; expected.revision = old.revision + 1;
+        fs.disk->crashAfter = crash;
+        bool interrupted = false;
+        try { TEST_ASSERT_TRUE(saveViews(fs, next, old.revision).has_value()); }
+        catch (const fs::PowerLoss&) { interrupted = true; }
+        if (crash == 0) boundaries = fs.disk->mutations.size();
+        else TEST_ASSERT_TRUE(interrupted);
+        fs.reboot();
+        auto loaded = loadViews(fs);
+        TEST_ASSERT_TRUE(loaded.has_value());
+        TEST_ASSERT_TRUE(*loaded == old || *loaded == expected);
+        TEST_ASSERT_TRUE(loadViews(fs) == *loaded);
+        auto saved = saveViews(fs, next, loaded->revision);
+        TEST_ASSERT_TRUE(saved.has_value());
+        TEST_ASSERT_EQUAL_UINT32(2, saved->schema_version);
+        TEST_ASSERT_TRUE(saved->views == expected.views);
+        TEST_ASSERT_EQUAL_STRING("original content", fs.bytes(item().path).c_str());
+        TEST_ASSERT_EQUAL_STRING("original bookmark", fs.bytes(bookmark).c_str());
+    }
+    TEST_ASSERT_GREATER_THAN(3, boundaries);
+}
 void empty_and_unknown_roundtrips() {
     auto r = item(); r.status = Status::unknown; r.unknown_reason = "legacy-unindexed";
     TEST_ASSERT_TRUE(decodeItem(*encode(r)) == r);
@@ -510,6 +613,10 @@ int main() {
     UNITY_BEGIN();
     RUN_TEST(roundtrip_item);
     RUN_TEST(roundtrip_feeds_views);
+    RUN_TEST(publisher_views_require_version_two_without_changing_other_records);
+    RUN_TEST(legacy_views_load_unchanged_and_upgrade_only_on_save);
+    RUN_TEST(future_view_versions_are_never_downgraded_or_recovered_over);
+    RUN_TEST(view_version_upgrade_survives_each_power_loss_boundary);
     RUN_TEST(save_load);
     RUN_TEST(empty_and_unknown_roundtrips);
     RUN_TEST(rejects_corruption_and_truncation);

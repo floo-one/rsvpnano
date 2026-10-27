@@ -193,6 +193,7 @@ enum class UiText : uint8_t {
     LibraryItems,
     OrganizationUnavailable,
     LibrarySaveFailed,
+    LibraryPublisher,
     Count,
 };
 

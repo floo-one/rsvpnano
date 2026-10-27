@@ -3031,7 +3031,7 @@ English = "Newsletters"
 [[strings]]
 key = "NeedsReview"
 context = "Library MVP navigation and item actions."
-English = "Needs review"
+English = "Review status"
 
 [[strings]]
 key = "OtherArticles"
@@ -3112,3 +3112,8 @@ English = "Status unavailable"
 key = "LibrarySaveFailed"
 context = "Library MVP navigation and item actions."
 English = "List position not saved"
+
+[[strings]]
+key = "LibraryPublisher"
+context = "Older articles grouped by their saved source hostname, without confirmed RSS feed membership."
+English = "Saved articles"

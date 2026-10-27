@@ -951,12 +951,26 @@ void App::runBackgroundJob() {
                 jobItemRecovery_ = item->restart.has_value();
             } else if (item.error() != std::errc::no_such_file_or_directory)
                 jobItemError_ = item.error();
-            else if (libraryScreen_.view().generation() == selected.generation) {
-                for (const auto& row : libraryScreen_.view().rows())
-                    if (row.path == selected.path && row.source == selected.source) {
-                        jobItemStatus_ = row.status;
-                        break;
-                    }
+            if (!jobItemError_ && (!item || LibraryOrganization::isLegacyUnclassified(*item))) {
+                bool found = false;
+                if (libraryScreen_.view().generation() == selected.generation)
+                    for (const auto& row : libraryScreen_.view().rows())
+                        if (row.path == selected.path && row.source == selected.source) {
+                            jobItemStatus_ = row.status; found = true;
+                            break;
+                        }
+                if (!found) {
+                    // The Read menu can open Item actions before a library
+                    // snapshot exists. Apply the same read-only legacy policy.
+                    BookMetadata metadata;
+                    const auto identity = storage_.readBookMetadata(storage_.findBook(selected.path), metadata);
+                    const auto bookmarkPath = StoragePaths::bookStatePathFor(selected.path);
+                    const bool ambiguous = std::ranges::count_if(storage_.books(), [&](const auto& book) {
+                        return StoragePaths::bookStatePathFor(book.path) == bookmarkPath;
+                    }) > 1;
+                    jobItemStatus_ = LibraryView::inspectBookmark(Board::Storage::filesystem(), selected.path,
+                                                                  identity, ambiguous).legacyStatus;
+                }
             }
         } else {
             ReadingOrganization::Target target{selected.path, selected.source, {}, selected.generation};

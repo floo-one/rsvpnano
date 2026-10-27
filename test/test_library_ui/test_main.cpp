@@ -56,7 +56,8 @@ struct Fixture {
     Screen screen = Screen::Library;
     uint32_t clock = 1;
     size_t io = 0;
-    Fixture(size_t n = 6, LO::Status status = LO::Status::unread, int w = 640, int h = 172) : gfx(w, h) {
+    Fixture(size_t n = 6, LO::Status status = LO::Status::unread, int w = 640, int h = 172,
+            bool legacy = false) : gfx(w, h) {
         contact = {};
         ui.setTheme(theme);
         ui.setTouchSource({.surface = {static_cast<uint16_t>(w), static_cast<uint16_t>(h)}, .poll = &poll});
@@ -64,11 +65,12 @@ struct Fixture {
             auto path = "/library/books/" + std::to_string(i) + ".txt";
             fs.put(path, "abc");
             storage.inventory.push_back({path, 3, "Title " + std::to_string(i), "Author"});
-            if (status != LO::Status::unknown) {
+            if (!legacy) {
                 LO::Item item;
                 item.path = path;
                 item.source = *LO::hashSource(fs, path);
                 item.status = status;
+                if (status == LO::Status::unknown) item.unknown_reason = "previous-status-unknown";
                 TEST_ASSERT_TRUE(LO::saveItem(fs, item, 0).has_value());
             }
         }
@@ -222,6 +224,83 @@ void needs_review_is_temporary_and_unfiltered() {
     f.draw();
     TEST_ASSERT_EQUAL(std::string::npos, f.gfx.text.find("Unread"));
     TEST_ASSERT_NOT_EQUAL(std::string::npos, f.gfx.text.find("Previous status unknown"));
+}
+void legacy_books_are_unread_without_reviewing_first() {
+    Fixture f(3, LO::Status::unknown, 640, 172, true);
+    const auto mutations = f.fs.disk->mutations.size();
+    f.draw();
+    TEST_ASSERT_EQUAL(std::string::npos, f.gfx.text.find("Needs review"));
+    f.books();
+    TEST_ASSERT_TRUE(f.library.view().tab() == LO::Tab::unread);
+    TEST_ASSERT_EQUAL(3, f.library.view().order().size());
+    TEST_ASSERT_EQUAL(std::string::npos, f.gfx.text.find("Previous status unknown"));
+    TEST_ASSERT_EQUAL(3, LibraryView::count(f.library.view().rows(), "books").unread);
+    TEST_ASSERT_TRUE(f.tap(220, 60) == Action::OpenBook);
+    TEST_ASSERT_TRUE(f.library.selection()->path == f.storage.inventory[0].path);
+    TEST_ASSERT_EQUAL(0, f.io);
+    TEST_ASSERT_EQUAL(mutations, f.fs.disk->mutations.size());
+}
+void publisher_navigation_selects_canonical_article_and_restores_context() {
+    Fixture f(1);
+    f.fs.disk->fail = {};
+    const auto append = [&](std::string path, std::string title, std::string source) {
+        const std::string bytes = "@title " + title + "\n@source " + source + "\n\nArticle body";
+        f.fs.put(path, bytes);
+        f.storage.inventory.push_back({std::move(path), bytes.size(), std::move(title), "Author"});
+    };
+    append("/library/articles/other.rsvp", "Different publisher", "https://z.example/post");
+    // Inventory order differs from the displayed order; taps must retain file identity.
+    append("/library/articles/z.rsvp", "Zeta", "https://example.com/z");
+    append("/library/articles/a.rsvp", "Alpha", "https://example.com/a");
+    for (size_t i = 0; i < 4; ++i)
+        append("/library/articles/b" + std::to_string(i) + ".rsvp", "Beta " + std::to_string(i),
+               "https://example.com/b" + std::to_string(i));
+    TEST_ASSERT_TRUE(f.library.prepare(f.storage, f.fs).has_value());
+    f.io = 0;
+    f.fs.disk->fail = [&](const auto&, const auto&) { ++f.io; return false; };
+    f.draw();
+    f.tap(220, 100);
+    TEST_ASSERT_TRUE(f.library.page() == LibraryScreen::Page::feeds);
+    f.draw();
+    TEST_ASSERT_NOT_EQUAL(std::string::npos, f.gfx.text.find("example.com"));
+    f.tap(220, 50);
+    TEST_ASSERT_TRUE(f.library.view().collection() == "source:example.com");
+    TEST_ASSERT_TRUE(f.library.view().tab() == LO::Tab::unread);
+    TEST_ASSERT_EQUAL(6, f.library.view().order().size());
+    TEST_ASSERT_TRUE(f.tap(220, 60) == Action::OpenBook);
+    TEST_ASSERT_TRUE(f.library.selection()->path == f.storage.inventory[3].path);
+
+    f.tap(60, 150);
+    TEST_ASSERT_TRUE(f.library.view().tab() == LO::Tab::read);
+    f.tap(60, 20);
+    TEST_ASSERT_TRUE(f.library.page() == LibraryScreen::Page::feeds);
+    f.tap(60, 20);
+    TEST_ASSERT_TRUE(f.library.page() == LibraryScreen::Page::root);
+    f.tap(220, 100);
+    f.tap(220, 50);
+    TEST_ASSERT_TRUE(f.library.view().tab() == LO::Tab::read);
+    f.tap(60, 60);
+    f.sample(true, 220, 150);
+    f.sample(true, 220, 90);
+    f.sample(false, 220, 90);
+    TEST_ASSERT_EQUAL(60, f.library.view().scroll());
+    f.library.rememberReaderOrigin();
+    f.library.showRoot();
+    f.books();
+    f.library.restoreReaderOrigin();
+    TEST_ASSERT_TRUE(f.library.view().collection() == "source:example.com");
+    TEST_ASSERT_TRUE(f.library.view().tab() == LO::Tab::unread);
+    TEST_ASSERT_EQUAL(60, f.library.view().scroll());
+    f.draw();
+    TEST_ASSERT_EQUAL(0, f.io);
+
+    f.fs.disk->fail = {};
+    TEST_ASSERT_TRUE(f.library.saveViews(f.fs).has_value());
+    LibraryScreen restored;
+    TEST_ASSERT_TRUE(restored.prepare(f.storage, f.fs).has_value());
+    TEST_ASSERT_TRUE(restored.openCollection("source:example.com", f.storage));
+    TEST_ASSERT_TRUE(restored.view().tab() == LO::Tab::unread);
+    TEST_ASSERT_EQUAL(60, restored.view().scroll());
 }
 void refreshed_inventory_cancels_old_press() {
     Fixture f;
@@ -382,6 +461,8 @@ int main() {
     RUN_TEST(root_collection_navigation_and_tabs);
     RUN_TEST(feed_navigation_returns_to_chooser_then_root);
     RUN_TEST(needs_review_is_temporary_and_unfiltered);
+    RUN_TEST(legacy_books_are_unread_without_reviewing_first);
+    RUN_TEST(publisher_navigation_selects_canonical_article_and_restores_context);
     RUN_TEST(refreshed_inventory_cancels_old_press);
     RUN_TEST(actions_disable_redundant_marks_and_keep_reset_separate);
     RUN_TEST(actions_require_ready_and_recovery_blocks_marks);
